@@ -3,11 +3,11 @@ from datetime import datetime, timezone, timedelta
 from PIL import Image
 import pytest
 
-from tests.test_main import client, engine, TestingSessionLocal
+from tests.test_main import client, engine, TestingSessionLocal, ADMIN_KEY, ADMIN_HEADERS, auth
 from app.config import settings
 from app.database import Base
 from app.models import URLItem
-from app.redis_client import clear_all_redis_keys
+from app.redis_client import clear_all_redis_keys, delete_cached_url
 from app.utils import (
     parse_user_agent,
     normalize_referrer,
@@ -20,12 +20,23 @@ from app.qr import generate_qr_svg, generate_qr_png, generate_qr_matrix
 
 
 @pytest.fixture(autouse=True)
-def setup_and_teardown_advanced_db():
+def setup_and_teardown_advanced_db(monkeypatch):
+    monkeypatch.setattr(settings, "ADMIN_API_KEY", ADMIN_KEY)
     Base.metadata.create_all(bind=engine)
     clear_all_redis_keys()
     yield
     Base.metadata.drop_all(bind=engine)
     clear_all_redis_keys()
+
+
+def set_expiry_in_db(short_code: str, expires_at: datetime) -> None:
+    """Edit expires_at directly in the DB, invalidating the cache as the API would."""
+    db = TestingSessionLocal()
+    item = db.query(URLItem).filter(URLItem.short_code == short_code).first()
+    item.expires_at = expires_at
+    db.commit()
+    db.close()
+    delete_cached_url(short_code)
 
 
 # Observability & Health
@@ -182,7 +193,8 @@ def test_patch_with_self_referential_url_rejected():
 
     patch_res = client.patch(
         "/api/v1/urls/patch-loop",
-        json={"long_url": "http://testserver/forbidden"}
+        json={"long_url": "http://testserver/forbidden"},
+        headers=auth(create_res)
     )
     assert patch_res.status_code == 400
     assert "Cannot shorten a URL pointing to this shortener service." in patch_res.json()["detail"]
@@ -212,11 +224,7 @@ def test_expired_link_redirect_returns_410_gone():
         json={"long_url": "https://example.com/will-expire", "custom_code": "expired-code"}
     )
 
-    db = TestingSessionLocal()
-    item = db.query(URLItem).filter(URLItem.short_code == "expired-code").first()
-    item.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
-    db.commit()
-    db.close()
+    set_expiry_in_db("expired-code", datetime.now(timezone.utc) - timedelta(days=1))
 
     redir = client.get("/expired-code", follow_redirects=False)
     assert redir.status_code == 410
@@ -230,11 +238,7 @@ def test_expired_link_stats_marked_expired():
         json={"long_url": "https://example.com/expired-stats", "custom_code": "exp-stats"}
     )
 
-    db = TestingSessionLocal()
-    item = db.query(URLItem).filter(URLItem.short_code == "exp-stats").first()
-    item.expires_at = datetime.now(timezone.utc) - timedelta(hours=5)
-    db.commit()
-    db.close()
+    set_expiry_in_db("exp-stats", datetime.now(timezone.utc) - timedelta(hours=5))
 
     stats_res = client.get("/api/v1/urls/exp-stats/stats")
     assert stats_res.status_code == 200
@@ -270,18 +274,18 @@ def test_list_urls_pagination():
     for i in range(5):
         client.post("/api/v1/urls", json={"long_url": f"https://example.com/page-{i}"})
 
-    p1 = client.get("/api/v1/urls?skip=0&limit=2").json()
+    p1 = client.get("/api/v1/urls?skip=0&limit=2", headers=ADMIN_HEADERS).json()
     assert p1["total"] == 5
     assert len(p1["items"]) == 2
     assert p1["skip"] == 0
     assert p1["limit"] == 2
 
-    p2 = client.get("/api/v1/urls?skip=2&limit=2").json()
+    p2 = client.get("/api/v1/urls?skip=2&limit=2", headers=ADMIN_HEADERS).json()
     assert p2["total"] == 5
     assert len(p2["items"]) == 2
     assert p2["skip"] == 2
 
-    p3 = client.get("/api/v1/urls?skip=4&limit=2").json()
+    p3 = client.get("/api/v1/urls?skip=4&limit=2", headers=ADMIN_HEADERS).json()
     assert p3["total"] == 5
     assert len(p3["items"]) == 1
     assert p3["skip"] == 4
@@ -293,17 +297,17 @@ def test_list_urls_search_filter():
     client.post("/api/v1/urls", json={"long_url": "https://beta.example.com/special-keyword", "custom_code": "search-beta"})
 
     # Search by short code substring
-    res_code = client.get("/api/v1/urls?search=alpha").json()
+    res_code = client.get("/api/v1/urls?search=alpha", headers=ADMIN_HEADERS).json()
     assert res_code["total"] == 1
     assert res_code["items"][0]["short_code"] == "search-alpha"
 
     # Search by destination long URL substring
-    res_url = client.get("/api/v1/urls?search=special-keyword").json()
+    res_url = client.get("/api/v1/urls?search=special-keyword", headers=ADMIN_HEADERS).json()
     assert res_url["total"] == 1
     assert res_url["items"][0]["short_code"] == "search-beta"
 
     # Search non-matching term
-    res_none = client.get("/api/v1/urls?search=no-such-term").json()
+    res_none = client.get("/api/v1/urls?search=no-such-term", headers=ADMIN_HEADERS).json()
     assert res_none["total"] == 0
     assert len(res_none["items"]) == 0
 
@@ -314,29 +318,29 @@ def test_list_urls_active_only_filter():
     client.post("/api/v1/urls", json={"long_url": "https://active.com", "custom_code": "act-1"})
 
     # Inactive URL
-    client.post("/api/v1/urls", json={"long_url": "https://inactive.com", "custom_code": "inact-1"})
-    client.patch("/api/v1/urls/inact-1", json={"is_active": False})
+    inactive = client.post("/api/v1/urls", json={"long_url": "https://inactive.com", "custom_code": "inact-1"})
+    assert client.patch("/api/v1/urls/inact-1", json={"is_active": False}, headers=auth(inactive)).status_code == 200
 
     # Expired URL
     client.post("/api/v1/urls", json={"long_url": "https://expired.com", "custom_code": "exp-1"})
-    db = TestingSessionLocal()
-    e_item = db.query(URLItem).filter(URLItem.short_code == "exp-1").first()
-    e_item.expires_at = datetime.now(timezone.utc) - timedelta(days=2)
-    db.commit()
-    db.close()
+    set_expiry_in_db("exp-1", datetime.now(timezone.utc) - timedelta(days=2))
 
-    res = client.get("/api/v1/urls?active_only=true").json()
+    # Click-capped URL that has used up its quota
+    client.post("/api/v1/urls", json={"long_url": "https://capped.com", "custom_code": "cap-1", "max_clicks": 1})
+    client.get("/cap-1", follow_redirects=False)
+
+    res = client.get("/api/v1/urls?active_only=true", headers=ADMIN_HEADERS).json()
     assert res["total"] == 1
     assert res["items"][0]["short_code"] == "act-1"
 
 
 def test_patch_url_deactivate_and_reactivate():
     """Test PATCH /api/v1/urls/{code} deactivating returns 410 on redirect and reactivating restores 307."""
-    client.post("/api/v1/urls", json={"long_url": "https://toggle.com", "custom_code": "toggle-me"})
+    created = client.post("/api/v1/urls", json={"long_url": "https://toggle.com", "custom_code": "toggle-me"})
     assert client.get("/toggle-me", follow_redirects=False).status_code == 307
 
     # Deactivate
-    p1 = client.patch("/api/v1/urls/toggle-me", json={"is_active": False})
+    p1 = client.patch("/api/v1/urls/toggle-me", json={"is_active": False}, headers=auth(created))
     assert p1.status_code == 200
     assert p1.json()["is_active"] is False
 
@@ -344,7 +348,7 @@ def test_patch_url_deactivate_and_reactivate():
     assert client.get("/toggle-me", follow_redirects=False).status_code == 410
 
     # Reactivate
-    p2 = client.patch("/api/v1/urls/toggle-me", json={"is_active": True})
+    p2 = client.patch("/api/v1/urls/toggle-me", json={"is_active": True}, headers=auth(created))
     assert p2.status_code == 200
     assert p2.json()["is_active"] is True
 
@@ -354,13 +358,13 @@ def test_patch_url_deactivate_and_reactivate():
 
 def test_patch_url_update_long_url():
     """Test PATCH /api/v1/urls/{code} updating long_url alters the redirect destination and cache."""
-    client.post("/api/v1/urls", json={"long_url": "https://original-domain.com", "custom_code": "patch-target"})
+    created = client.post("/api/v1/urls", json={"long_url": "https://original-domain.com", "custom_code": "patch-target"})
     r1 = client.get("/patch-target", follow_redirects=False)
     assert r1.status_code == 307
     assert r1.headers["location"] == "https://original-domain.com/"
 
     # Update destination target
-    p = client.patch("/api/v1/urls/patch-target", json={"long_url": "https://updated-domain.com/landing"})
+    p = client.patch("/api/v1/urls/patch-target", json={"long_url": "https://updated-domain.com/landing"}, headers=auth(created))
     assert p.status_code == 200
     assert p.json()["long_url"] == "https://updated-domain.com/landing"
 
@@ -371,25 +375,25 @@ def test_patch_url_update_long_url():
 
 def test_patch_url_update_max_clicks():
     """Test PATCH /api/v1/urls/{code} updating max_clicks."""
-    client.post("/api/v1/urls", json={"long_url": "https://patch-clicks.com", "custom_code": "patch-clicks"})
-    p = client.patch("/api/v1/urls/patch-clicks", json={"max_clicks": 5})
+    created = client.post("/api/v1/urls", json={"long_url": "https://patch-clicks.com", "custom_code": "patch-clicks"})
+    p = client.patch("/api/v1/urls/patch-clicks", json={"max_clicks": 5}, headers=auth(created))
     assert p.status_code == 200
     assert p.json()["max_clicks"] == 5
 
 
 def test_patch_url_not_found():
     """Test PATCH /api/v1/urls/{code} on a non-existent short code returns HTTP 404."""
-    res = client.patch("/api/v1/urls/ghost-url", json={"is_active": False})
+    res = client.patch("/api/v1/urls/ghost-url", json={"is_active": False}, headers=ADMIN_HEADERS)
     assert res.status_code == 404
     assert "not found" in res.json()["detail"].lower()
 
 
 def test_delete_url_complete_lifecycle():
     """Test DELETE /api/v1/urls/{code} removes database records, click events, and cache mappings."""
-    client.post("/api/v1/urls", json={"long_url": "https://delete-target.com", "custom_code": "del-code"})
+    created = client.post("/api/v1/urls", json={"long_url": "https://delete-target.com", "custom_code": "del-code"})
     client.get("/del-code", follow_redirects=False)
 
-    del_res = client.delete("/api/v1/urls/del-code")
+    del_res = client.delete("/api/v1/urls/del-code", headers=auth(created))
     assert del_res.status_code == 204
 
     # Subsequent redirect returns 404
@@ -399,12 +403,12 @@ def test_delete_url_complete_lifecycle():
     assert client.get("/api/v1/urls/del-code/stats").status_code == 404
 
     # Subsequent delete returns 404
-    assert client.delete("/api/v1/urls/del-code").status_code == 404
+    assert client.delete("/api/v1/urls/del-code", headers=auth(created)).status_code == 404
 
 
 def test_delete_url_not_found():
     """Test DELETE /api/v1/urls/{code} returns HTTP 404 for non-existent code."""
-    res = client.delete("/api/v1/urls/never-existed")
+    res = client.delete("/api/v1/urls/never-existed", headers=ADMIN_HEADERS)
     assert res.status_code == 404
 
 

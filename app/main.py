@@ -1,3 +1,4 @@
+import hmac
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from fastapi import (
 from fastapi.responses import RedirectResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text, func
+from sqlalchemy import text, func, inspect
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -43,7 +44,13 @@ from app.utils import (
     hash_client_ip,
     parse_user_agent,
     normalize_referrer,
-    is_url_expired
+    is_url_expired,
+    utcnow,
+    to_naive_utc,
+    get_client_ip,
+    generate_manage_token,
+    hash_manage_token,
+    escape_like,
 )
 from app.qr import generate_qr_svg, generate_qr_png
 from app.redis_client import (
@@ -54,16 +61,27 @@ from app.redis_client import (
     increment_url_clicks,
     get_buffered_clicks,
     flush_buffered_clicks,
-    get_cache_stats
+    get_cache_stats,
+    ping_redis,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def ensure_schema() -> None:
+    """Create missing tables and add columns introduced after a table was first created."""
+    Base.metadata.create_all(bind=engine)
+    columns = {col["name"] for col in inspect(engine).get_columns("urls")}
+    if "manage_token_hash" not in columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE urls ADD COLUMN manage_token_hash VARCHAR(64)"))
+        logger.info("Added urls.manage_token_hash column.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Ensure database tables exist on startup."""
-    Base.metadata.create_all(bind=engine)
+    """Ensure database schema is current on startup."""
+    ensure_schema()
     yield
 
 
@@ -77,7 +95,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -103,14 +121,83 @@ async def observability_middleware(request: Request, call_next):
     return response
 
 
+def request_client_ip(request: Request) -> Optional[str]:
+    """Client IP for rate limiting and analytics, resolved through trusted proxies only."""
+    peer = request.client.host if request.client else None
+    return get_client_ip(request.headers.get("X-Forwarded-For"), peer)
+
+
+def _presented_credential(request: Request) -> Optional[str]:
+    """Extract a bearer token or X-API-Key header value from the request."""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return request.headers.get("X-API-Key") or None
+
+
+def is_admin(request: Request) -> bool:
+    """True if the request carries the configured admin API key."""
+    credential = _presented_credential(request)
+    return bool(
+        settings.ADMIN_API_KEY
+        and credential
+        and hmac.compare_digest(credential, settings.ADMIN_API_KEY)
+    )
+
+
+def require_manage_access(url_item: URLItem, request: Request) -> None:
+    """Allow the request only with the link's own manage token or the admin API key."""
+    credential = _presented_credential(request)
+    if not credential:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: send 'Authorization: Bearer <manage_token>'.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if is_admin(request):
+        return
+    if url_item.manage_token_hash and hmac.compare_digest(
+        hash_manage_token(credential), url_item.manage_token_hash
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="This token is not authorized to manage this short URL."
+    )
+
+
+def points_to_this_service(long_url: str, request: Request) -> bool:
+    """True if long_url targets this service, as reached by this request or at its public BASE_URL."""
+    return is_self_referential_url(long_url, str(request.base_url)) or is_self_referential_url(
+        long_url, settings.BASE_URL
+    )
+
+
+def cache_url_item(url_item: URLItem) -> None:
+    """Cache a usable link for fast redirects, never longer than its remaining lifetime."""
+    if not url_item.is_active or is_url_expired(url_item.expires_at):
+        delete_cached_url(url_item.short_code)
+        return
+    ttl = settings.CACHE_TTL_SECONDS
+    if url_item.expires_at is not None:
+        remaining = (to_naive_utc(url_item.expires_at) - utcnow()).total_seconds()
+        ttl = max(1, min(ttl, int(remaining)))
+    set_cached_url(
+        url_item.short_code,
+        url_item.long_url,
+        expires_at=to_naive_utc(url_item.expires_at).isoformat() if url_item.expires_at else None,
+        max_clicks=url_item.max_clicks,
+        ttl=ttl,
+    )
+
+
 def rate_limiter(
     limit: int = settings.RATE_LIMIT_REQUESTS,
     window_seconds: int = settings.RATE_LIMIT_WINDOW_SECONDS
 ):
     """Rate limiting dependency per client IP."""
     def dependency(request: Request):
-        forwarded = request.headers.get("X-Forwarded-For")
-        client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+        client_ip = request_client_ip(request) or "unknown"
         endpoint = request.url.path
         rate_key = f"{client_ip}:{endpoint}"
 
@@ -145,7 +232,7 @@ def persist_clicks_to_db(
     clicks_to_add = flush_buffered_clicks(short_code)
     db = SessionLocal()
     try:
-        now_utc = datetime.now(timezone.utc)
+        now_utc = utcnow()
         if clicks_to_add > 0:
             db.query(URLItem).filter(URLItem.short_code == short_code).update(
                 {
@@ -176,7 +263,7 @@ def persist_clicks_to_db(
         db.close()
 
 
-def build_url_response(url_item: URLItem, request: Request) -> URLResponse:
+def build_url_response(url_item: URLItem, request: Request, manage_token: Optional[str] = None) -> URLResponse:
     """Construct a standardized URLResponse schema from a database model."""
     base_url = str(request.base_url).rstrip("/")
     current_clicks = (url_item.click_count or 0) + get_buffered_clicks(url_item.short_code)
@@ -190,21 +277,22 @@ def build_url_response(url_item: URLItem, request: Request) -> URLResponse:
         max_clicks=url_item.max_clicks,
         click_count=current_clicks,
         qr_code_url=f"{base_url}/api/v1/urls/{url_item.short_code}/qr",
+        manage_token=manage_token,
     )
 
 
 def _create_single_short_url(payload: URLCreate, request: Request, db: Session) -> URLResponse:
-    """Shorten a single URL and persist mapping."""
+    """Shorten a single URL and persist mapping. Every call creates a new link owned by the caller."""
     long_url_str = str(payload.long_url)
-    if is_self_referential_url(long_url_str, str(request.base_url)):
+    if points_to_this_service(long_url_str, request):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot shorten a URL pointing to this shortener service."
         )
 
-    expires_at = payload.expires_at
+    expires_at = to_naive_utc(payload.expires_at)
     if expires_at is None and payload.expires_in_seconds is not None:
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=payload.expires_in_seconds)
+        expires_at = utcnow() + timedelta(seconds=payload.expires_in_seconds)
 
     if expires_at is not None and is_url_expired(expires_at):
         raise HTTPException(
@@ -213,66 +301,31 @@ def _create_single_short_url(payload: URLCreate, request: Request, db: Session) 
         )
 
     if payload.custom_code:
-        custom_code = payload.custom_code.strip()
-        if is_reserved_short_code(custom_code):
+        short_code = payload.custom_code.strip()
+        if is_reserved_short_code(short_code):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Custom code '{custom_code}' is a reserved system keyword."
+                detail=f"Custom code '{short_code}' is a reserved system keyword."
             )
-        existing = db.query(URLItem).filter(URLItem.short_code == custom_code).first()
-        if existing:
-            if existing.long_url == long_url_str:
-                updated = False
-                if expires_at is not None:
-                    existing.expires_at = expires_at
-                    updated = True
-                if payload.max_clicks is not None:
-                    existing.max_clicks = payload.max_clicks
-                    updated = True
-                if not existing.is_active:
-                    existing.is_active = True
-                    updated = True
-                if updated:
-                    db.commit()
-                    db.refresh(existing)
-                set_cached_url(existing.short_code, existing.long_url)
-                return build_url_response(existing, request)
+        if db.query(URLItem.id).filter(URLItem.short_code == short_code).first():
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Custom short code '{custom_code}' is already in use."
+                detail=f"Custom short code '{short_code}' is already in use."
             )
-        short_code = custom_code
     else:
         max_retries = 10
         short_code = None
         for attempt in range(max_retries):
-            salt = "" if attempt == 0 else f"_salt_{attempt}"
+            # Deterministic first candidate; random salts afterwards so repeated
+            # shortening of the same URL can never exhaust the retry budget.
+            salt = "" if attempt == 0 else f"_salt_{generate_manage_token()}"
             candidate = generate_base62_short_code(url=long_url_str, salt=salt, length=7)
             if is_reserved_short_code(candidate):
                 continue
-
-            existing = db.query(URLItem).filter(URLItem.short_code == candidate).first()
-            if not existing:
+            if not db.query(URLItem.id).filter(URLItem.short_code == candidate).first():
                 short_code = candidate
                 break
-            elif existing.long_url == long_url_str:
-                if is_url_expired(existing.expires_at) or not existing.is_active:
-                    existing.is_active = True
-                    existing.expires_at = expires_at
-                    existing.max_clicks = payload.max_clicks
-                    db.commit()
-                    db.refresh(existing)
-                elif expires_at is not None or payload.max_clicks is not None:
-                    if expires_at is not None:
-                        existing.expires_at = expires_at
-                    if payload.max_clicks is not None:
-                        existing.max_clicks = payload.max_clicks
-                    db.commit()
-                    db.refresh(existing)
-                set_cached_url(existing.short_code, existing.long_url)
-                return build_url_response(existing, request)
-            else:
-                logger.info(f"Collision detected for Base62 code '{candidate}' (attempt {attempt + 1}). Retrying with salt...")
+            logger.info(f"Short code '{candidate}' already taken (attempt {attempt + 1}). Retrying with salt...")
 
         if not short_code:
             raise HTTPException(
@@ -280,12 +333,14 @@ def _create_single_short_url(payload: URLCreate, request: Request, db: Session) 
                 detail="Unable to generate unique short code. Please try again."
             )
 
+    manage_token = generate_manage_token()
     url_item = URLItem(
         short_code=short_code,
         long_url=long_url_str,
         expires_at=expires_at,
         max_clicks=payload.max_clicks,
-        is_active=True
+        is_active=True,
+        manage_token_hash=hash_manage_token(manage_token),
     )
     try:
         db.add(url_item)
@@ -295,11 +350,20 @@ def _create_single_short_url(payload: URLCreate, request: Request, db: Session) 
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A conflict occurred while creating the short URL."
+            detail=f"Short code '{short_code}' is already in use."
         )
 
-    set_cached_url(url_item.short_code, url_item.long_url)
-    return build_url_response(url_item, request)
+    cache_url_item(url_item)
+    return build_url_response(url_item, request, manage_token=manage_token)
+
+
+def usable_link_filters() -> tuple:
+    """SQL filters selecting links that would currently redirect."""
+    return (
+        URLItem.is_active.is_(True),
+        (URLItem.expires_at.is_(None)) | (URLItem.expires_at > utcnow()),
+        (URLItem.max_clicks.is_(None)) | (URLItem.click_count < URLItem.max_clicks),
+    )
 
 
 @app.get("/", tags=["Health"])
@@ -335,7 +399,7 @@ def health_check(db: Session = Depends(get_db)):
         logger.error(f"Database health check failed: {e}")
         db_status = "unhealthy"
 
-    cache_backend = get_cache_stats()["backend"]
+    cache_backend = "redis" if ping_redis() else "in-memory"
     overall_status = "healthy" if db_status == "healthy" else "degraded"
 
     return HealthResponse(
@@ -370,12 +434,8 @@ def dashboard():
 )
 def get_metrics(db: Session = Depends(get_db)):
     """Application observability metrics including URL counts, clicks, and cache stats."""
-    now_utc = datetime.now(timezone.utc)
     total_urls = db.query(URLItem).count()
-    active_urls = db.query(URLItem).filter(
-        URLItem.is_active.is_(True),
-        (URLItem.expires_at.is_(None)) | (URLItem.expires_at > now_utc)
-    ).count()
+    active_urls = db.query(URLItem).filter(*usable_link_filters()).count()
     total_clicks_res = db.query(func.coalesce(func.sum(URLItem.click_count), 0)).scalar()
     total_clicks = int(total_clicks_res or 0)
 
@@ -428,7 +488,16 @@ def create_batch_short_urls(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Batch size exceeds maximum limit of {settings.MAX_BATCH_SIZE} URLs."
         )
-    items = [_create_single_short_url(item, request, db) for item in payload.urls]
+    items = []
+    for index, item in enumerate(payload.urls):
+        try:
+            items.append(_create_single_short_url(item, request, db))
+        except HTTPException as exc:
+            created = ", ".join(i.short_code for i in items) or "none"
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=f"urls[{index}]: {exc.detail} (already created: {created})",
+            )
     return URLBatchResponse(items=items, count=len(items))
 
 
@@ -444,23 +513,42 @@ def list_urls(
     limit: int = Query(settings.DEFAULT_PAGE_LIMIT, ge=1, le=100),
     search: Optional[str] = Query(None, description="Search term for short code or long URL"),
     active_only: bool = Query(False, description="Filter for active, non-expired URLs only"),
+    codes: Optional[str] = Query(
+        None,
+        description="Comma-separated short codes to list (max 100). Required unless using the admin API key."
+    ),
     db: Session = Depends(get_db)
 ):
-    """Retrieve a paginated list of short URLs with optional search and active-only filtering."""
+    """
+    Retrieve a paginated list of short URLs with optional search and active-only filtering.
+    Listing every link requires the admin API key; anyone else must name the codes they want.
+    """
     query = db.query(URLItem)
 
+    if codes is not None:
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+        if len(code_list) > 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At most 100 codes can be requested at once."
+            )
+        query = query.filter(URLItem.short_code.in_(code_list))
+    elif not is_admin(request):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Listing all links requires the admin API key; pass ?codes=a,b,c to list specific links.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if search:
-        search_term = f"%{search.strip()}%"
+        search_term = f"%{escape_like(search.strip())}%"
         query = query.filter(
-            (URLItem.short_code.ilike(search_term)) | (URLItem.long_url.ilike(search_term))
+            (URLItem.short_code.ilike(search_term, escape="\\"))
+            | (URLItem.long_url.ilike(search_term, escape="\\"))
         )
 
     if active_only:
-        now_utc = datetime.now(timezone.utc)
-        query = query.filter(
-            URLItem.is_active.is_(True),
-            (URLItem.expires_at.is_(None)) | (URLItem.expires_at > now_utc)
-        )
+        query = query.filter(*usable_link_filters())
 
     total = query.count()
     items_db = query.order_by(URLItem.created_at.desc()).offset(skip).limit(limit).all()
@@ -493,10 +581,11 @@ def update_short_url(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Short URL '{short_code}' not found."
         )
+    require_manage_access(url_item, request)
 
-    if "long_url" in payload.model_fields_set and payload.long_url is not None:
+    if "long_url" in payload.model_fields_set:
         long_url_str = str(payload.long_url)
-        if is_self_referential_url(long_url_str, str(request.base_url)):
+        if points_to_this_service(long_url_str, request):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot shorten a URL pointing to this shortener service."
@@ -507,7 +596,7 @@ def update_short_url(
         url_item.is_active = payload.is_active
 
     if "expires_at" in payload.model_fields_set:
-        url_item.expires_at = payload.expires_at
+        url_item.expires_at = to_naive_utc(payload.expires_at)
 
     if "max_clicks" in payload.model_fields_set:
         url_item.max_clicks = payload.max_clicks
@@ -515,11 +604,7 @@ def update_short_url(
     db.commit()
     db.refresh(url_item)
 
-    if url_item.is_active and not is_url_expired(url_item.expires_at):
-        set_cached_url(url_item.short_code, url_item.long_url)
-    else:
-        delete_cached_url(url_item.short_code)
-
+    cache_url_item(url_item)
     return build_url_response(url_item, request)
 
 
@@ -531,6 +616,7 @@ def update_short_url(
 )
 def delete_short_url(
     short_code: str,
+    request: Request,
     db: Session = Depends(get_db)
 ):
     """Delete a shortened URL and all associated telemetry events."""
@@ -540,6 +626,7 @@ def delete_short_url(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Short URL '{short_code}' not found."
         )
+    require_manage_access(url_item, request)
 
     db.query(ClickEvent).filter(ClickEvent.short_code == short_code).delete()
     db.delete(url_item)
@@ -574,12 +661,16 @@ def get_url_qr_code(
     base_url = str(request.base_url).rstrip("/")
     short_url = f"{base_url}/{url_item.short_code}"
 
-    if format == "png":
-        img_bytes = generate_qr_png(data=short_url, scale=scale)
-        return Response(content=img_bytes, media_type="image/png")
-    else:
-        svg_content = generate_qr_svg(data=short_url, scale=scale)
-        return Response(content=svg_content, media_type="image/svg+xml")
+    try:
+        if format == "png":
+            return Response(content=generate_qr_png(data=short_url, scale=scale), media_type="image/png")
+        return Response(content=generate_qr_svg(data=short_url, scale=scale), media_type="image/svg+xml")
+    except ValueError as exc:
+        logger.error(f"QR generation failed for '{short_code}': {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Short URL is too long to encode as a QR code."
+        )
 
 
 @app.get(
@@ -606,39 +697,26 @@ def get_url_stats(
 
     real_time_clicks = (url_item.click_count or 0) + get_buffered_clicks(short_code)
 
-    events = db.query(ClickEvent).filter(ClickEvent.short_code == short_code).all()
+    events = db.query(ClickEvent).filter(ClickEvent.short_code == short_code)
 
-    unique_ips = {e.ip_hash for e in events if e.ip_hash}
-    unique_visitors = len(unique_ips)
+    unique_visitors = (
+        events.filter(ClickEvent.ip_hash.isnot(None))
+        .with_entities(func.count(func.distinct(ClickEvent.ip_hash)))
+        .scalar()
+    ) or 0
 
-    clicks_by_date: Dict[str, int] = {}
-    top_referrers: Dict[str, int] = {}
-    device_breakdown: Dict[str, int] = {}
-    browser_breakdown: Dict[str, int] = {}
-    os_breakdown: Dict[str, int] = {}
+    def breakdown(column, by_count: bool = True) -> Dict[str, int]:
+        rows = events.with_entities(column, func.count()).group_by(column).all()
+        counts = {str(key): count for key, count in rows if key is not None}
+        if by_count:
+            return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
+        return dict(sorted(counts.items()))
 
-    for e in events:
-        if e.clicked_at:
-            date_str = e.clicked_at.strftime("%Y-%m-%d")
-            clicks_by_date[date_str] = clicks_by_date.get(date_str, 0) + 1
-
-        ref = e.referrer or "Direct"
-        top_referrers[ref] = top_referrers.get(ref, 0) + 1
-
-        dev = e.device_type or "Desktop"
-        device_breakdown[dev] = device_breakdown.get(dev, 0) + 1
-
-        browser = e.browser or "Other"
-        browser_breakdown[browser] = browser_breakdown.get(browser, 0) + 1
-
-        os_name = e.os_name or "Other"
-        os_breakdown[os_name] = os_breakdown.get(os_name, 0) + 1
-
-    sorted_dates = dict(sorted(clicks_by_date.items()))
-    sorted_referrers = dict(sorted(top_referrers.items(), key=lambda x: x[1], reverse=True))
-    sorted_devices = dict(sorted(device_breakdown.items(), key=lambda x: x[1], reverse=True))
-    sorted_browsers = dict(sorted(browser_breakdown.items(), key=lambda x: x[1], reverse=True))
-    sorted_os = dict(sorted(os_breakdown.items(), key=lambda x: x[1], reverse=True))
+    sorted_dates = breakdown(func.date(ClickEvent.clicked_at), by_count=False)
+    sorted_referrers = breakdown(ClickEvent.referrer)
+    sorted_devices = breakdown(ClickEvent.device_type)
+    sorted_browsers = breakdown(ClickEvent.browser)
+    sorted_os = breakdown(ClickEvent.os_name)
 
     base_url = str(request.base_url).rstrip("/")
     short_url = f"{base_url}/{url_item.short_code}"
@@ -663,8 +741,9 @@ def get_url_stats(
     )
 
 
-@app.get(
+@app.api_route(
     "/{short_code}",
+    methods=["GET", "HEAD"],
     response_class=RedirectResponse,
     status_code=status.HTTP_307_TEMPORARY_REDIRECT,
     tags=["Redirect"],
@@ -676,39 +755,68 @@ def redirect_to_long_url(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
-    """Redirect to original long URL and schedule analytics persistence."""
-    target_url = get_cached_url(short_code)
-    url_item = db.query(URLItem).filter(URLItem.short_code == short_code).first()
+    """
+    Redirect to original long URL and schedule analytics persistence.
 
-    if not target_url and not url_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Short URL with code '{short_code}' not found."
-        )
+    Uncapped links are served from the cache without touching the database. Links with
+    a click cap always go to the database, which atomically claims the click so
+    concurrent requests can never exceed max_clicks. HEAD requests (link previews,
+    uptime checks) resolve the link without counting a click.
+    """
+    count_click = request.method == "GET"
+    gone = HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=f"Short URL '{short_code}' has expired, reached its click limit, or been deactivated."
+    )
 
-    if url_item:
-        current_total_clicks = (url_item.click_count or 0) + get_buffered_clicks(short_code)
-        if (
-            not url_item.is_active
-            or is_url_expired(url_item.expires_at)
-            or (url_item.max_clicks is not None and current_total_clicks >= url_item.max_clicks)
-        ):
+    cached = get_cached_url(short_code)
+    if cached and cached.get("max_clicks") is None:
+        expires_at = datetime.fromisoformat(cached["expires_at"]) if cached.get("expires_at") else None
+        if is_url_expired(expires_at):
             delete_cached_url(short_code)
+            raise gone
+        target_url = cached["long_url"]
+        if count_click:
+            increment_url_clicks(short_code)
+    else:
+        url_item = db.query(URLItem).filter(URLItem.short_code == short_code).first()
+        if not url_item:
             raise HTTPException(
-                status_code=status.HTTP_410_GONE,
-                detail=f"Short URL '{short_code}' has expired, reached its click limit, or been deactivated."
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Short URL with code '{short_code}' not found."
             )
-        if not target_url:
-            target_url = url_item.long_url
-            set_cached_url(short_code, target_url)
+        if not url_item.is_active or is_url_expired(url_item.expires_at):
+            delete_cached_url(short_code)
+            raise gone
 
-    forwarded = request.headers.get("X-Forwarded-For")
-    client_ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else None)
-    user_agent = request.headers.get("User-Agent")
-    referrer = request.headers.get("Referer")
+        target_url = url_item.long_url
+        if url_item.max_clicks is not None:
+            buffered = get_buffered_clicks(short_code)
+            if count_click:
+                claimed = db.query(URLItem).filter(
+                    URLItem.short_code == short_code,
+                    URLItem.click_count + buffered < URLItem.max_clicks,
+                ).update(
+                    {URLItem.click_count: URLItem.click_count + 1, URLItem.last_clicked_at: utcnow()},
+                    synchronize_session=False,
+                )
+                db.commit()
+                if not claimed:
+                    raise gone
+            elif (url_item.click_count or 0) + buffered >= url_item.max_clicks:
+                raise gone
+        elif count_click:
+            increment_url_clicks(short_code)
+        cache_url_item(url_item)
 
-    increment_url_clicks(short_code)
-    background_tasks.add_task(persist_clicks_to_db, short_code, user_agent, referrer, client_ip)
+    if count_click:
+        background_tasks.add_task(
+            persist_clicks_to_db,
+            short_code,
+            request.headers.get("User-Agent"),
+            request.headers.get("Referer"),
+            request_client_ip(request),
+        )
 
     return RedirectResponse(
         url=target_url,

@@ -18,6 +18,16 @@ class Settings(BaseSettings):
 
     BASE_URL: str = "http://localhost:8000"
 
+    # Grants full access (list all links, manage any link). Empty disables admin access.
+    ADMIN_API_KEY: str = ""
+    # Secret salt for visitor IP hashing; set a private value in production.
+    IP_HASH_SALT: str = "url_shortener_ip_salt"
+    # Number of reverse proxies in front of the app that append to X-Forwarded-For.
+    # 0 ignores the header entirely and uses the socket peer address.
+    TRUSTED_PROXY_HOPS: int = 1
+
+    MAX_LONG_URL_LENGTH: int = 2048
+
     MAX_BATCH_SIZE: int = 20
     DEFAULT_PAGE_LIMIT: int = 20
     RESERVED_SHORT_CODES: set[str] = {

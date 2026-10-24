@@ -1,4 +1,5 @@
 import hashlib
+import secrets
 import string
 from datetime import datetime, timezone
 from typing import Optional
@@ -8,6 +9,47 @@ from app.config import settings
 
 BASE62_ALPHABET = string.digits + string.ascii_letters
 BASE = len(BASE62_ALPHABET)
+
+
+def utcnow() -> datetime:
+    """Current UTC time as a naive datetime, matching how DateTime columns are stored."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    """Convert an aware datetime to naive UTC; naive values are assumed to already be UTC."""
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def get_client_ip(forwarded_for: Optional[str], peer_host: Optional[str]) -> Optional[str]:
+    """
+    Resolve the real client IP. Each trusted proxy appends the address it received the
+    request from to X-Forwarded-For, so the entry TRUSTED_PROXY_HOPS from the right is the
+    first one a client cannot forge. Entries further left are client-controlled.
+    """
+    hops = settings.TRUSTED_PROXY_HOPS
+    if hops > 0 and forwarded_for:
+        entries = [e.strip() for e in forwarded_for.split(",") if e.strip()]
+        if entries:
+            return entries[-hops] if len(entries) >= hops else entries[0]
+    return peer_host
+
+
+def generate_manage_token() -> str:
+    """Return a new random secret that authorizes managing a single short URL."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_manage_token(token: str) -> str:
+    """Hash a management token for storage; tokens are high-entropy so no salt is needed."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def escape_like(term: str) -> str:
+    """Escape SQL LIKE wildcards so user search input matches literally (escape char: backslash)."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def encode_base62(num: int) -> str:
@@ -99,7 +141,7 @@ def hash_client_ip(ip: Optional[str]) -> str:
     """Return a 16-character SHA-256 hex digest of salted IP address for privacy-safe tracking."""
     if not ip or not ip.strip():
         return ""
-    salted = f"url_shortener_ip_salt:{ip.strip()}"
+    salted = f"{settings.IP_HASH_SALT}:{ip.strip()}"
     return hashlib.sha256(salted.encode("utf-8")).hexdigest()[:16]
 
 

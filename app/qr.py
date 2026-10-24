@@ -83,7 +83,9 @@ def _pick_version(data_byte_count: int) -> int:
         header_len = 2 if v < 10 else 3
         if data_byte_count + header_len <= cap:
             return v
-    return 10
+    raise ValueError(
+        f"QR payload of {data_byte_count} bytes exceeds the maximum supported capacity (Version 10-L)."
+    )
 
 
 def _build_codewords(data: str, version: int) -> list[int]:
@@ -93,7 +95,7 @@ def _build_codewords(data: str, version: int) -> list[int]:
     raw_data = data.encode("utf-8")
     header_bytes = 2 if version < 10 else 3
     if len(raw_data) + header_bytes > total_data_bytes:
-        raw_data = raw_data[:total_data_bytes - header_bytes]
+        raise ValueError(f"QR payload does not fit in Version {version}.")
 
     # Mode 0100 (Byte mode: 4 bits)
     bits = [0, 1, 0, 0]

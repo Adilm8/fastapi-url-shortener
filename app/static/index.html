@@ -513,7 +513,7 @@
               <h2 class="text-xl font-bold text-white tracking-tight">Managed Links</h2>
               <span id="links-total-count" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-surface-800 text-slate-300 border border-surface-700">0</span>
             </div>
-            <p class="text-xs text-slate-400 mt-1">Real-time status, click metrics, telemetry analysis, and lifecycle controls.</p>
+            <p id="links-scope-label" class="text-xs text-slate-400 mt-1">Links created in this browser. Enter an admin key to manage all links.</p>
           </div>
 
           <!-- Filters & Actions -->
@@ -544,6 +544,22 @@
               />
               <span>Active Only</span>
             </label>
+
+            <!-- Admin Key -->
+            <form onsubmit="saveAdminKey(event)" class="flex items-center gap-2">
+              <input
+                type="password"
+                id="admin-key-input"
+                autocomplete="off"
+                placeholder="Admin key (optional)"
+                class="w-40 px-3 py-2 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-xs font-mono transition"
+              />
+              <button
+                type="submit"
+                id="admin-key-btn"
+                class="px-3 py-2 rounded-xl bg-surface-950 hover:bg-surface-800 text-slate-300 hover:text-white border border-surface-700 text-xs transition"
+              >Use key</button>
+            </form>
 
             <!-- Refresh Button -->
             <button
@@ -845,6 +861,79 @@
         .replace(/'/g, '&#039;');
     }
 
+    // Credentials: per-link manage tokens (returned once at creation) and an optional admin key.
+    // Wrapped in try/catch because storage can be unavailable (private mode, blocked site data).
+    const TOKENS_KEY = 'linkpulse.manageTokens';
+    const ADMIN_KEY = 'linkpulse.adminKey';
+
+    function loadTokens() {
+      try { return JSON.parse(localStorage.getItem(TOKENS_KEY)) || {}; } catch { return {}; }
+    }
+    function saveTokens(tokens) {
+      try { localStorage.setItem(TOKENS_KEY, JSON.stringify(tokens)); } catch {}
+    }
+    function rememberToken(item) {
+      if (!item || !item.manage_token) return;
+      const tokens = loadTokens();
+      tokens[item.short_code] = item.manage_token;
+      saveTokens(tokens);
+    }
+    function forgetToken(shortCode) {
+      const tokens = loadTokens();
+      delete tokens[shortCode];
+      saveTokens(tokens);
+    }
+    function getAdminKey() {
+      try { return localStorage.getItem(ADMIN_KEY) || ''; } catch { return ''; }
+    }
+    function authHeaders(shortCode) {
+      const credential = getAdminKey() || loadTokens()[shortCode];
+      return credential ? { 'Authorization': `Bearer ${credential}` } : {};
+    }
+    function canManage(shortCode) {
+      return Boolean(getAdminKey() || loadTokens()[shortCode]);
+    }
+
+    function updateAdminKeyUi() {
+      const hasKey = Boolean(getAdminKey());
+      document.getElementById('admin-key-input').value = '';
+      document.getElementById('admin-key-input').placeholder = hasKey ? 'Admin key saved' : 'Admin key (optional)';
+      document.getElementById('admin-key-btn').textContent = hasKey ? 'Clear key' : 'Use key';
+      document.getElementById('links-scope-label').textContent = hasKey
+        ? 'All links (admin). Real-time status, click metrics, and lifecycle controls.'
+        : 'Links created in this browser. Enter an admin key to manage all links.';
+    }
+
+    function saveAdminKey(e) {
+      e.preventDefault();
+      const input = document.getElementById('admin-key-input');
+      try {
+        if (getAdminKey()) localStorage.removeItem(ADMIN_KEY);
+        else if (input.value.trim()) localStorage.setItem(ADMIN_KEY, input.value.trim());
+      } catch {
+        showToast('Browser storage is unavailable; cannot save the key', 'error');
+      }
+      updateAdminKeyUi();
+      fetchLinks(0);
+    }
+
+    // Helper: turn a FastAPI error body (string or validation-error list) into a message
+    function apiErrorMessage(data, fallback) {
+      const detail = data && data.detail;
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail) && detail.length) {
+        return detail.map(d => {
+          const field = Array.isArray(d.loc) ? d.loc.filter(p => p !== 'body').join('.') : '';
+          return field ? `${field}: ${d.msg}` : d.msg;
+        }).join('; ');
+      }
+      return fallback;
+    }
+
+    async function readJson(res) {
+      try { return await res.json(); } catch { return null; }
+    }
+
     // Helper: Toast alerts
     function showToast(message, type = 'success') {
       const container = document.getElementById('toast-container');
@@ -988,11 +1077,27 @@
       if (searchVal) url += `&search=${encodeURIComponent(searchVal)}`;
       if (activeOnly) url += `&active_only=true`;
 
+      const adminKey = getAdminKey();
+      const headers = adminKey ? { 'Authorization': `Bearer ${adminKey}` } : {};
+      if (!adminKey) {
+        // Most recent 100 links created here (the API's per-request limit)
+        const myCodes = Object.keys(loadTokens()).slice(-100);
+        url += `&codes=${encodeURIComponent(myCodes.join(','))}`;
+      }
+
       const tbody = document.getElementById('links-table-body');
       try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
+        const res = await fetch(url, { headers });
+        const data = await readJson(res);
+        if (!res.ok) {
+          if (res.status === 401 && adminKey) {
+            try { localStorage.removeItem(ADMIN_KEY); } catch {}
+            updateAdminKeyUi();
+            showToast('Admin key rejected; showing links created in this browser', 'error');
+            return fetchLinks(0);
+          }
+          throw new Error(apiErrorMessage(data, `HTTP ${res.status}`));
+        }
 
         // Update counts
         document.getElementById('links-total-count').textContent = data.total || 0;
@@ -1205,10 +1310,11 @@
           body: JSON.stringify(payload)
         });
 
-        const data = await res.json();
+        const data = await readJson(res);
         if (!res.ok) {
-          throw new Error(data.detail || 'Failed to create short link');
+          throw new Error(apiErrorMessage(data, 'Failed to create short link'));
         }
+        rememberToken(data);
 
         showToast(`Short link created: ${data.short_code}`, 'success');
 
@@ -1294,12 +1400,13 @@
           body: JSON.stringify(payload)
         });
 
-        const data = await res.json();
+        const data = await readJson(res);
         if (!res.ok) {
-          throw new Error(data.detail || 'Batch processing failed');
+          throw new Error(apiErrorMessage(data, 'Batch processing failed'));
         }
 
         batchCreatedUrls = data.items || [];
+        batchCreatedUrls.forEach(rememberToken);
         showToast(`Successfully processed ${batchCreatedUrls.length} URLs!`, 'success');
 
         // Render batch results
@@ -1364,10 +1471,10 @@
       try {
         const res = await fetch(`/api/v1/urls/${encodeURIComponent(shortCode)}`, {
           method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', ...authHeaders(shortCode) },
           body: JSON.stringify({ is_active: newActive })
         });
-        if (!res.ok) throw new Error('Failed to update status');
+        if (!res.ok) throw new Error(apiErrorMessage(await readJson(res), 'Failed to update status'));
         showToast(`Link '${shortCode}' ${newActive ? 'activated' : 'paused'}`, 'info');
         fetchLinks(currentSkip);
         fetchTelemetry();
@@ -1383,9 +1490,12 @@
       }
       try {
         const res = await fetch(`/api/v1/urls/${encodeURIComponent(shortCode)}`, {
-          method: 'DELETE'
+          method: 'DELETE',
+          headers: authHeaders(shortCode)
         });
-        if (!res.ok && res.status !== 204) throw new Error('Failed to delete URL');
+        if (res.status === 404) forgetToken(shortCode);
+        if (!res.ok) throw new Error(apiErrorMessage(await readJson(res), 'Failed to delete URL'));
+        forgetToken(shortCode);
         showToast(`Short link '${shortCode}' deleted`, 'info');
         fetchLinks(currentSkip);
         fetchTelemetry();
@@ -1584,6 +1694,7 @@
 
     // Initial Load & Auto-Telemetry Poll
     document.addEventListener('DOMContentLoaded', () => {
+      updateAdminKeyUi();
       fetchTelemetry();
       fetchLinks(0);
       // Auto-poll telemetry every 15 seconds

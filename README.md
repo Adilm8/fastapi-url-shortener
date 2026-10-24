@@ -22,12 +22,13 @@ A production-style URL shortening and click-analytics service engineered with **
 
 ## 🌟 Executive Engineering Highlights
 
-- **Low-Latency Redirect Path**: Decouples HTTP 307 temporary redirects from synchronous relational database writes: target URLs are served from the Redis cache when available, and clicks are counted with atomic Redis `INCR` counters and persisted in a background task.
+- **Low-Latency Redirect Path**: Decouples HTTP 307 temporary redirects from synchronous relational database writes: uncapped links are served entirely from the Redis cache (including expiry checks), and clicks are counted with atomic Redis `INCR` counters and persisted in a background task. Click-capped links claim each click with a single conditional SQL `UPDATE`, so concurrent requests can never exceed `max_clicks`.
 - **Base62 Slicing with Salted Collision Resolution**: Generates concise 7-character aliases across a 62-character alphabet ($62^7 \approx 3.52$ trillion keys) using truncated SHA-256 digests with deterministic salting reprobing.
 - **Granular, Privacy-Preserving Telemetry**: Logs device categories (Desktop, Mobile, Tablet, Bot), browsers, operating systems, and referring domains, while tracking unique visitors via salted SHA-256 IP hashing; raw IPs are not stored.
 - **Pure-Python Reed-Solomon QR Code Engine**: Generates ISO/IEC 18004 visual matrices directly in vector SVG XML and raster PNG bytes using Galois Field $GF(2^8)$ arithmetic with no external QR-code API (Pillow is used only for PNG rendering).
 - **Graceful Dual-Layer Degradation (L2 -> L1 Fallback)**: Automatically falls back to thread-safe in-memory caching and sliding-window rate tracking if Redis is unreachable, guaranteeing zero-crash operation in local development and CI.
 - **Full Link Lifecycle Governance**: Supports custom aliases, automated time-to-live (TTL) expiration (`expires_at` / `expires_in_seconds`), click quotas (`max_clicks`), and soft deactivation/reactivation (`PATCH`).
+- **Per-Link Ownership**: Each new link returns a one-time `manage_token`; only that token (or the operator's `ADMIN_API_KEY`) can modify or delete the link.
 - **Sliding-Window Rate Limiting**: Protects the `POST` creation endpoints with Redis-backed per-IP rate limiting, emitting standard `X-RateLimit-*` and `Retry-After` HTTP headers.
 - **Self-Contained Dark-Mode Web Dashboard**: Responsive single-page application built with Tailwind CSS at `/dashboard`, supporting 1-click link creation, batch shortening, live analytics drawer, and QR code downloads.
 
@@ -109,20 +110,48 @@ All endpoints are versioned under `/api/v1` (with standard roots for health, red
 | `GET` | `/api/v1/metrics` | Operational metrics (cache hit ratio, total links/clicks) | `MetricsResponse` |
 | `POST` | `/api/v1/urls` | Create short URL (Base62 or Custom Alias, TTL, Max Clicks) | `URLResponse` (201) |
 | `POST` | `/api/v1/urls/batch` | Batch shorten multiple URLs (up to 20 per request) | `URLBatchResponse` (201) |
-| `GET` | `/api/v1/urls` | Paginated link list with search & active-status filters | `URLListResponse` |
+| `GET` | `/api/v1/urls` | Paginated link list with search & active-status filters. Admin key lists all links; otherwise pass `?codes=a,b,c` | `URLListResponse` |
 | `GET` | `/api/v1/urls/{short_code}/stats` | Granular telemetry, demographic breakdowns, & unique visitors | `URLStatsResponse` |
-| `PATCH` | `/api/v1/urls/{short_code}` | Update target URL, active status, expiration, or click cap | `URLResponse` |
-| `DELETE` | `/api/v1/urls/{short_code}` | Decommission link, delete click events, and purge cache | `204 No Content` |
+| `PATCH` | `/api/v1/urls/{short_code}` | Update target URL, active status, expiration, or click cap (🔒 manage token or admin key) | `URLResponse` |
+| `DELETE` | `/api/v1/urls/{short_code}` | Decommission link, delete click events, and purge cache (🔒 manage token or admin key) | `204 No Content` |
 | `GET` | `/api/v1/urls/{short_code}/qr` | Generate scannable QR Code matrix (`format=svg` or `png`) | `image/svg+xml` / `image/png` |
-| `GET` | `/{short_code}` | Temporary redirect with background click telemetry (`410` if expired, inactive, or over quota) | `307 Temporary Redirect` |
+| `GET` / `HEAD` | `/{short_code}` | Temporary redirect with background click telemetry (`410` if expired, inactive, or over quota). `HEAD` resolves without counting a click | `307 Temporary Redirect` |
+
+### Authentication
+
+Creating a link returns a `manage_token` **once**; store it. Send it to manage that link:
+
+```bash
+curl -X PATCH "http://localhost:8000/api/v1/urls/fastapi-docs" \
+     -H "Authorization: Bearer <manage_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"is_active": false}'
+```
+
+Missing credentials return `401`; a token for a different link returns `403`. Setting the `ADMIN_API_KEY` environment variable enables an operator key (sent the same way, or as `X-API-Key`) that can list all links and manage any link. Links created before tokens existed can only be managed with the admin key. Stats, QR codes, and metrics stay public.
+
+The dashboard keeps the tokens of links it creates in the browser's local storage and lists those links; enter the admin key in the dashboard to see and manage every link.
+
+### Configuration
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | `sqlite:///./url_shortener.db` | SQLAlchemy URL (`postgres://` URLs are normalized) |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis server; the app falls back to in-memory and reconnects automatically |
+| `ADMIN_API_KEY` | *(empty: disabled)* | Operator key for listing and managing all links |
+| `IP_HASH_SALT` | `url_shortener_ip_salt` | Secret salt for visitor IP hashes; set a private value in production |
+| `TRUSTED_PROXY_HOPS` | `1` | Reverse proxies that append to `X-Forwarded-For` (Railway: `1`; direct access: `0`) |
+| `BASE_URL` | `http://localhost:8000` | Public URL, also blocked as a shortening target to prevent redirect loops |
+| `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `10` / `60` | Creation rate limit per client IP |
 
 ### Validation & limits
 
 - `custom_code`: 3-16 characters, `[A-Za-z0-9_-]` only; reserved system keywords are rejected with `400`.
-- Shortening a long URL that already has a code returns the existing short code instead of creating a duplicate.
+- Every create returns a new, independently owned link, even for a long URL that was shortened before.
+- `long_url` must be `http`/`https` and at most 2048 characters. All timestamps are UTC and returned with a `Z` suffix; expiry times sent with a UTC offset are converted.
 - A redirect to an expired, deactivated, or over-quota (`max_clicks`) link returns `410 Gone`.
 - Batch requests accept 1-20 URLs.
-- Rate limiting applies only to the `POST` creation endpoints (single and batch), default 10 requests per 60 seconds per client IP and path; responses carry `X-RateLimit-*` headers and `429` responses include `Retry-After`. Redirects are not rate limited.
+- Rate limiting applies only to the `POST` creation endpoints (single and batch), default 10 requests per 60 seconds per client IP and path; responses carry `X-RateLimit-*` headers and `429` responses include `Retry-After`. Redirects are not rate limited. The client IP is taken from `X-Forwarded-For` only as far back as `TRUSTED_PROXY_HOPS` allows, so clients cannot dodge the limit by forging the header.
 
 ---
 
@@ -151,7 +180,8 @@ curl -X POST "http://localhost:8000/api/v1/urls" \
   "is_active": true,
   "max_clicks": 500,
   "click_count": 0,
-  "qr_code_url": "http://localhost:8000/api/v1/urls/fastapi-docs/qr"
+  "qr_code_url": "http://localhost:8000/api/v1/urls/fastapi-docs/qr",
+  "manage_token": "Wq3...store-this-secret..."
 }
 ```
 
@@ -275,6 +305,7 @@ The `pytest` suite (run against an in-memory SQLite database) covers Base62 enco
 Run the test suite locally with `pytest`:
 
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest -v
 ```
 

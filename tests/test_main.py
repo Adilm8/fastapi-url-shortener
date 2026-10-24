@@ -36,10 +36,19 @@ main_module.SessionLocal = TestingSessionLocal
 
 client = TestClient(app)
 
+ADMIN_KEY = "test-admin-key"
+ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_KEY}"}
+
+
+def auth(create_res) -> dict:
+    """Authorization headers carrying the manage token returned when a link was created."""
+    return {"Authorization": f"Bearer {create_res.json()['manage_token']}"}
+
 
 @pytest.fixture(autouse=True)
-def setup_and_teardown_db():
+def setup_and_teardown_db(monkeypatch):
     """Create fresh database tables and reset all cache/rate limit states before each test."""
+    monkeypatch.setattr(settings, "ADMIN_API_KEY", ADMIN_KEY)
     Base.metadata.create_all(bind=engine)
     clear_all_redis_keys()
     yield
@@ -70,18 +79,49 @@ def test_create_short_url_base62():
     assert "created_at" in data
 
 
-def test_idempotent_duplicate_url():
-    """Test that submitting the exact same long URL returns the existing short code."""
+def test_duplicate_url_creates_independent_link():
+    """
+    Shortening the same long URL twice yields two independently owned links, so one
+    creator can never modify, pause, or delete another creator's link.
+    """
     payload = {"long_url": "https://fastapi.tiangolo.com/tutorial/"}
     res1 = client.post("/api/v1/urls", json=payload)
-    assert res1.status_code == 201
-    code1 = res1.json()["short_code"]
-
     res2 = client.post("/api/v1/urls", json=payload)
-    assert res2.status_code == 201
-    code2 = res2.json()["short_code"]
+    assert res1.status_code == res2.status_code == 201
+    code1, code2 = res1.json()["short_code"], res2.json()["short_code"]
+    assert code1 != code2
 
-    assert code1 == code2
+    # The second creator's token cannot touch the first link
+    assert client.patch(f"/api/v1/urls/{code1}", json={"is_active": False}, headers=auth(res2)).status_code == 403
+    assert client.get(f"/{code1}", follow_redirects=False).status_code == 307
+    assert client.get(f"/{code2}", follow_redirects=False).status_code == 307
+
+
+def test_repeated_shortening_never_exhausts_code_generation():
+    """Shortening one URL many times keeps producing unique codes (random salts after the first)."""
+    codes = set()
+    for i in range(15):
+        res = client.post(
+            "/api/v1/urls",
+            json={"long_url": "https://example.com/popular"},
+            headers={"X-Forwarded-For": f"198.51.100.{i}"},
+        )
+        assert res.status_code == 201
+        codes.add(res.json()["short_code"])
+    assert len(codes) == 15
+
+
+def test_create_does_not_mutate_existing_link():
+    """Re-submitting an existing URL with new limits must not alter (or reactivate) the original."""
+    original = client.post("/api/v1/urls", json={"long_url": "https://example.com/owned"})
+    code = original.json()["short_code"]
+    client.patch(f"/api/v1/urls/{code}", json={"is_active": False}, headers=auth(original))
+
+    client.post("/api/v1/urls", json={"long_url": "https://example.com/owned", "max_clicks": 1})
+
+    stats = client.get(f"/api/v1/urls/{code}/stats").json()
+    assert stats["is_active"] is False
+    assert stats["max_clicks"] is None
 
 
 def test_collision_detection_and_resolution():
@@ -198,7 +238,8 @@ def test_redis_cache_hit_redirect():
         json={"long_url": "https://redis.io", "custom_code": "redis-doc"}
     )
 
-    with patch("app.main.get_cached_url", return_value="https://redis.io/"):
+    cached = {"long_url": "https://redis.io/", "expires_at": None, "max_clicks": None}
+    with patch("app.main.get_cached_url", return_value=cached):
         res = client.get("/redis-doc", follow_redirects=False)
         assert res.status_code == 307
         assert res.headers["location"] == "https://redis.io/"
