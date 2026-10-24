@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,19 @@ class Settings(BaseSettings):
         "static",
         "favicon.ico",
     }
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Pin the psycopg2 driver explicitly.
+
+        Railway/Heroku may supply postgres://, which SQLAlchemy 2.x rejects, and
+        SQLAlchemy 2.1+ maps bare postgresql:// to psycopg (v3), which isn't installed.
+        """
+        for prefix in ("postgres://", "postgresql://"):
+            if v.startswith(prefix):
+                return "postgresql+psycopg2://" + v[len(prefix):]
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",
