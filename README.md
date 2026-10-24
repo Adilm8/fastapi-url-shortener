@@ -2,7 +2,7 @@
 
 # ⚡ LinkPulse: Distributed URL Shortener & Telemetry Platform
 
-A production-style URL shortening and click-analytics service engineered with **FastAPI**, **Redis**, and **PostgreSQL**. Features cache-aside redirects, write-behind click buffering, privacy-preserving visitor analytics, and a pure-Python Reed-Solomon QR code generator.
+A production-style URL shortening and click-analytics service engineered with **FastAPI**, **Redis**, and **PostgreSQL**. Features cache-served redirects, write-behind click buffering, per-link ownership tokens, atomic click quotas, privacy-preserving visitor analytics, and a pure-Python Reed-Solomon QR code generator.
 
 **Live demo:** [web-production-f4e28.up.railway.app](https://web-production-f4e28.up.railway.app) · [API docs](https://web-production-f4e28.up.railway.app/docs)
 
@@ -23,14 +23,14 @@ A production-style URL shortening and click-analytics service engineered with **
 ## 🌟 Executive Engineering Highlights
 
 - **Low-Latency Redirect Path**: Decouples HTTP 307 temporary redirects from synchronous relational database writes: uncapped links are served entirely from the Redis cache (including expiry checks), and clicks are counted with atomic Redis `INCR` counters and persisted in a background task. Click-capped links claim each click with a single conditional SQL `UPDATE`, so concurrent requests can never exceed `max_clicks`.
-- **Base62 Slicing with Salted Collision Resolution**: Generates concise 7-character aliases across a 62-character alphabet ($62^7 \approx 3.52$ trillion keys) using truncated SHA-256 digests with deterministic salting reprobing.
+- **Base62 Slicing with Salted Collision Resolution**: Generates concise 7-character aliases across a 62-character alphabet ($62^7 \approx 3.52$ trillion keys) using truncated SHA-256 digests: the first candidate is deterministic, and collisions are re-probed with random salts so codes for the same URL can never run out.
 - **Granular, Privacy-Preserving Telemetry**: Logs device categories (Desktop, Mobile, Tablet, Bot), browsers, operating systems, and referring domains, while tracking unique visitors via salted SHA-256 IP hashing; raw IPs are not stored.
 - **Pure-Python Reed-Solomon QR Code Engine**: Generates ISO/IEC 18004 visual matrices directly in vector SVG XML and raster PNG bytes using Galois Field $GF(2^8)$ arithmetic with no external QR-code API (Pillow is used only for PNG rendering).
-- **Graceful Dual-Layer Degradation (L2 -> L1 Fallback)**: Automatically falls back to thread-safe in-memory caching and sliding-window rate tracking if Redis is unreachable, guaranteeing zero-crash operation in local development and CI.
+- **Graceful Dual-Layer Degradation (L2 -> L1 Fallback)**: Automatically falls back to in-memory caching and sliding-window rate tracking if Redis is unreachable, and re-probes Redis every 15 seconds so the service recovers by itself when Redis returns.
 - **Full Link Lifecycle Governance**: Supports custom aliases, automated time-to-live (TTL) expiration (`expires_at` / `expires_in_seconds`), click quotas (`max_clicks`), and soft deactivation/reactivation (`PATCH`).
 - **Per-Link Ownership**: Each new link returns a one-time `manage_token`; only that token (or the operator's `ADMIN_API_KEY`) can modify or delete the link.
-- **Sliding-Window Rate Limiting**: Protects the `POST` creation endpoints with Redis-backed per-IP rate limiting, emitting standard `X-RateLimit-*` and `Retry-After` HTTP headers.
-- **Self-Contained Dark-Mode Web Dashboard**: Responsive single-page application built with Tailwind CSS at `/dashboard`, supporting 1-click link creation, batch shortening, live analytics drawer, and QR code downloads.
+- **Spoof-Resistant Rate Limiting**: Protects the `POST` creation endpoints with Redis-backed per-IP fixed-window limits (sliding window in the in-memory fallback), emitting standard `X-RateLimit-*` and `Retry-After` HTTP headers. Client IPs are read from the trusted end of `X-Forwarded-For` only.
+- **Self-Contained Dark-Mode Web Dashboard**: Responsive single-page application built with Tailwind CSS at `/dashboard`, supporting 1-click link creation, batch shortening, live analytics drawer, and QR code downloads. It remembers the links created in each browser, and an optional admin key unlocks every link.
 
 ---
 
@@ -45,7 +45,8 @@ flowchart LR
 
     subgraph Edge["FastAPI Application Tier"]
         Middleware["Timing & CORS Middleware<br/>(X-Process-Time-Ms)"]
-        RateLimiter["Sliding-Window Rate Limiter<br/>(X-RateLimit-*)"]
+        RateLimiter["Per-IP Rate Limiter<br/>(X-RateLimit-*)"]
+        Auth["Ownership Guard<br/>(manage token / admin key)"]
         Router["REST Controllers & Redirect Router"]
         BgWorker["Background Write-Behind Worker<br/>(persist_clicks_to_db)"]
         QREngine["Pure-Python QR Engine<br/>(Galois GF(2^8) Reed-Solomon)"]
@@ -67,9 +68,11 @@ flowchart LR
     RateLimiter -->|Check Quota| RedisCounter
     RateLimiter -.->|Fallback if Offline| MemoryFallback
     RateLimiter --> Router
+    Router -->|PATCH / DELETE / list all| Auth
 
-    Router -->|1. Cache-Aside Read| RedisCache
-    RedisCache -.->|Fallback on Miss/Down| PostgresDB
+    Router -->|1. Cached Link Record| RedisCache
+    RedisCache -.->|Miss, Redis down, or click-capped link| PostgresDB
+    Router -->|Capped links: conditional UPDATE| PostgresDB
     Router -->|2. Atomic Click Buffer| RedisCounter
     Router -->|3. Generate Matrix| QREngine
     Router -->|4. Non-Blocking 307 Redirect| Browser
@@ -86,15 +89,16 @@ flowchart LR
 | Feature | LinkPulse | Basic Implementations |
 | :--- | :---: | :---: |
 | **Shortcode Generation** | **Deterministic SHA-256 + Base62 ($62^7$ keys)** | Sequential Auto-Increment ID (Crawling Risk) |
-| **Collision Resolution** | **Deterministic Salted Linear Reprobing** | Unhandled / Crash on Unique Violation |
+| **Collision Resolution** | **Salted re-probing (random salts after the first candidate)** | Unhandled / Crash on Unique Violation |
 | **Redirect Latency** | **Served from Redis cache; no synchronous DB write on the redirect path** | Synchronous DB lookup and write per redirect |
 | **Click Persisting** | **Non-blocking Write-Behind (`BackgroundTasks`)** | Synchronous relational DB `UPDATE` |
 | **Visitor Telemetry** | **Device, OS, Browser, Referrer, Unique Visitors** | Basic integer increment |
 | **Privacy / PII Compliance** | **Salted SHA-256 IP hashing (raw IPs not stored)** | Raw IP logged / Stored |
 | **QR Code Engine** | **Pure-Python Reed-Solomon encoder ($GF(2^8)$), Pillow for PNG** | External 3rd-party API (Privacy Leak) |
-| **Link Governance** | **TTL Expiration, Click Quotas, Soft Toggling** | Permanent only |
-| **Rate Limiting** | **Sliding-Window with `Retry-After` Headers** | None |
-| **Resilience Tier** | **Graceful L2 (Redis) -> L1 (In-Memory) Fallback** | Hard crash if Redis offline |
+| **Link Governance** | **TTL Expiration, Atomic Click Quotas, Soft Toggling** | Permanent only |
+| **Access Control** | **Per-link manage tokens + optional admin key** | Anyone can edit or delete any link |
+| **Rate Limiting** | **Per-IP limits with `Retry-After`, resistant to forged `X-Forwarded-For`** | None |
+| **Resilience Tier** | **Graceful L2 (Redis) -> L1 (In-Memory) Fallback with auto-reconnect** | Hard crash if Redis offline |
 | **Web Dashboard** | **Tailwind CSS Dark-Mode SPA (`/dashboard`)** | None / Generic Swagger only |
 
 ---
@@ -255,6 +259,8 @@ Run the full distributed stack (**FastAPI + PostgreSQL 16 + Redis 7**) with zero
 docker compose up --build
 ```
 
+Set `ADMIN_API_KEY` in your shell or `.env` to enable the admin key. Compose sets `TRUSTED_PROXY_HOPS=0` because nothing sits in front of the app; if you put a reverse proxy in front, set it to the number of proxies.
+
 - **Web Dashboard**: [http://localhost:8000/dashboard](http://localhost:8000/dashboard)
 - **Interactive OpenAPI Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Alternative ReDoc UI**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
@@ -295,12 +301,30 @@ LinkPulse runs out-of-the-box using local SQLite and automatic in-memory caching
    ```bash
    uvicorn app.main:app --reload
    ```
+   Without a reverse proxy in front, set `TRUSTED_PROXY_HOPS=0` (in `.env`) so clients cannot pick their own IP for rate limiting.
+
+---
+
+## ☁️ Deployment (Railway)
+
+The live demo runs on [Railway](https://railway.com) with managed PostgreSQL and Redis. The `web` service builds from the [`Dockerfile`](Dockerfile) and **deploys automatically on every push to `main`**.
+
+Service variables:
+
+| Variable | Value |
+| :--- | :--- |
+| `DATABASE_URL` / `REDIS_URL` | References to the Railway Postgres and Redis services |
+| `ADMIN_API_KEY` | Long random secret (operator access) |
+| `IP_HASH_SALT` | Long random secret |
+| `TRUSTED_PROXY_HOPS` | Leave at the default `1` (Railway's edge proxy) |
+
+On startup the app creates missing tables and adds columns introduced by newer versions (e.g. `urls.manage_token_hash`), so upgrades need no manual migration. Links created before ownership tokens existed can be managed with the admin key.
 
 ---
 
 ## 🧪 Automated Testing & CI
 
-The `pytest` suite (run against an in-memory SQLite database) covers Base62 encoding and salted collision resolution, link creation and custom/reserved codes, redirects and click analytics, the Redis cache path, rate limiting, TTL expiry and click quotas, PATCH/DELETE lifecycle, pagination and search, batch creation, health and metrics endpoints, and QR code generation.
+The `pytest` suite (run against an in-memory SQLite database) covers Base62 encoding and salted collision resolution, link creation and custom/reserved codes, redirects and click analytics, the Redis cache path, rate limiting, TTL expiry and click quotas, PATCH/DELETE lifecycle, pagination and search, batch creation, health and metrics endpoints, and QR code generation. A dedicated hardening suite ([`tests/test_hardening.py`](tests/test_hardening.py)) covers ownership tokens and admin access, listing restrictions, forged `X-Forwarded-For` headers, UTC timestamp handling, atomic click quotas, `HEAD` redirects, cache-only redirects, Redis reconnection, oversized QR payloads, and the startup schema migration.
 
 Run the test suite locally with `pytest`:
 
