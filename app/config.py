@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application configuration loaded from environment or .env file."""
     APP_NAME: str = "URL Shortener API"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
 
     DATABASE_URL: str = "sqlite:///./url_shortener.db"
@@ -16,6 +16,20 @@ class Settings(BaseSettings):
     RATE_LIMIT_WINDOW_SECONDS: int = 60
 
     BASE_URL: str = "http://localhost:8000"
+
+    MAX_BATCH_SIZE: int = 20
+    DEFAULT_PAGE_LIMIT: int = 20
+    RESERVED_SHORT_CODES: set[str] = {
+        "api",
+        "docs",
+        "redoc",
+        "openapi.json",
+        "health",
+        "metrics",
+        "dashboard",
+        "static",
+        "favicon.ico",
+    }
 
     model_config = SettingsConfigDict(
         env_file=".env",

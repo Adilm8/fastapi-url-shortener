@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 _in_memory_cache: Dict[str, str] = {}
 _in_memory_rate_limits: Dict[str, list] = {}
 _in_memory_clicks: Dict[str, int] = {}
+_cache_hits: int = 0
+_cache_misses: int = 0
 _redis_available = False
 
 try:
@@ -28,14 +30,34 @@ except Exception:
 
 
 def get_cached_url(short_code: str) -> Optional[str]:
-    """Retrieve long URL from Redis cache or fallback cache."""
+    """Retrieve long URL from Redis cache or fallback cache with hit/miss tracking."""
+    global _cache_hits, _cache_misses
     key = f"url:{short_code}"
+    val = None
     if _redis_available and redis_client:
         try:
-            return redis_client.get(key)
+            val = redis_client.get(key)
         except redis.exceptions.RedisError as e:
             logger.warning(f"Redis get error for code '{short_code}': {e}")
-    return _in_memory_cache.get(key)
+    if val is None:
+        val = _in_memory_cache.get(key)
+
+    if val is not None:
+        _cache_hits += 1
+        if _redis_available and redis_client:
+            try:
+                redis_client.incr("stats:cache_hits")
+            except redis.exceptions.RedisError as e:
+                logger.warning(f"Redis incr error for stats:cache_hits: {e}")
+    else:
+        _cache_misses += 1
+        if _redis_available and redis_client:
+            try:
+                redis_client.incr("stats:cache_misses")
+            except redis.exceptions.RedisError as e:
+                logger.warning(f"Redis incr error for stats:cache_misses: {e}")
+
+    return val
 
 
 def set_cached_url(short_code: str, long_url: str, ttl: int = settings.CACHE_TTL_SECONDS) -> bool:
@@ -151,15 +173,53 @@ def flush_buffered_clicks(short_code: str) -> int:
     return val
 
 
+def get_cache_stats() -> dict:
+    """
+    Retrieve cache telemetry including total hits, misses, hit ratio,
+    and active cache backend type.
+    """
+    hits = _cache_hits
+    misses = _cache_misses
+
+    if _redis_available and redis_client:
+        try:
+            h = redis_client.get("stats:cache_hits")
+            m = redis_client.get("stats:cache_misses")
+            hits = int(h) if h else 0
+            misses = int(m) if m else 0
+        except (redis.exceptions.RedisError, ValueError) as e:
+            logger.warning(f"Redis get cache stats error: {e}")
+
+    total = hits + misses
+    hit_ratio = round(hits / total, 4) if total > 0 else 0.0
+    backend = "redis" if _redis_available else "in-memory"
+
+    return {
+        "hits": hits,
+        "misses": misses,
+        "hit_ratio": hit_ratio,
+        "backend": backend
+    }
+
+
 def clear_all_redis_keys():
     """Reset all in-memory and Redis keys (used for test isolation)."""
+    global _cache_hits, _cache_misses
     _in_memory_cache.clear()
     _in_memory_rate_limits.clear()
     _in_memory_clicks.clear()
+    _cache_hits = 0
+    _cache_misses = 0
     if _redis_available and redis_client:
         try:
-            keys = redis_client.keys("rate_limit:*") + redis_client.keys("clicks:*") + redis_client.keys("url:*")
-            if keys:
-                redis_client.delete(*keys)
+            keys = (
+                redis_client.keys("rate_limit:*")
+                + redis_client.keys("clicks:*")
+                + redis_client.keys("url:*")
+                + ["stats:cache_hits", "stats:cache_misses"]
+            )
+            existing_keys = [k for k in keys if k]
+            if existing_keys:
+                redis_client.delete(*existing_keys)
         except Exception as e:
             logger.warning(f"Error clearing Redis test keys: {e}")

@@ -1,0 +1,1594 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LinkPulse // High-Performance URL Shortener & Telemetry Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              400: '#818cf8',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            },
+            surface: {
+              950: '#070a12',
+              900: '#0c111d',
+              850: '#111726',
+              800: '#172033',
+              700: '#23304a',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Custom scrollbars */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0c111d;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #23304a;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #374668;
+    }
+    .glow-brand {
+      box-shadow: 0 0 30px -5px rgba(99, 102, 241, 0.25);
+    }
+    .glow-cyan {
+      box-shadow: 0 0 30px -5px rgba(6, 182, 212, 0.25);
+    }
+    .glow-emerald {
+      box-shadow: 0 0 25px -5px rgba(16, 185, 129, 0.25);
+    }
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.8; transform: scale(1.02); }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+  </style>
+</head>
+<body class="bg-surface-950 text-slate-100 min-h-screen flex flex-col font-sans selection:bg-brand-500 selection:text-white">
+
+  <!-- Ambient Background Glows -->
+  <div class="fixed inset-0 pointer-events-none overflow-hidden z-0">
+    <div class="absolute -top-40 left-1/4 w-96 h-96 bg-brand-500/10 rounded-full blur-3xl"></div>
+    <div class="absolute top-1/3 -right-20 w-96 h-96 bg-cyan-500/10 rounded-full blur-3xl"></div>
+    <div class="absolute -bottom-20 left-1/3 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl"></div>
+    <div class="absolute inset-0 bg-[radial-gradient(#1f293d_1px,transparent_1px)] [background-size:24px_24px] opacity-25"></div>
+  </div>
+
+  <div class="relative z-10 flex flex-col min-h-screen">
+    <!-- Top Navigation Bar -->
+    <header class="sticky top-0 z-40 border-b border-surface-800/80 bg-surface-900/80 backdrop-blur-xl">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+        <!-- Brand Logo -->
+        <div class="flex items-center space-x-3">
+          <div class="h-10 w-10 rounded-xl bg-gradient-to-tr from-brand-600 via-indigo-500 to-cyan-400 p-[1px] shadow-lg shadow-brand-500/20">
+            <div class="h-full w-full bg-surface-900 rounded-[11px] flex items-center justify-center">
+              <svg class="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+              </svg>
+            </div>
+          </div>
+          <div>
+            <div class="flex items-center space-x-2">
+              <span class="font-extrabold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-300 bg-clip-text text-transparent">LinkPulse</span>
+              <span class="text-xs font-mono px-1.5 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20">v2.0</span>
+            </div>
+            <p class="text-xs text-slate-400 hidden sm:block">FastAPI &bull; Redis Telemetry &bull; Base62</p>
+          </div>
+        </div>
+
+        <!-- System Health & Navigation Links -->
+        <div class="flex items-center space-x-2 sm:space-x-4">
+          <!-- Live Status Badge -->
+          <div id="health-badge" class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-surface-850 border border-surface-700/60 text-xs text-slate-300">
+            <span class="relative flex h-2 w-2">
+              <span id="health-pulse" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span id="health-dot" class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            <span id="health-label" class="font-medium">System Online</span>
+            <span class="text-slate-500">|</span>
+            <span id="cache-mode" class="font-mono text-[11px] text-cyan-400">Redis</span>
+          </div>
+
+          <!-- Documentation Quick Links -->
+          <a href="/docs" target="_blank" rel="noopener noreferrer" class="hidden md:inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white bg-surface-850 hover:bg-surface-800 border border-surface-700/60 transition">
+            <svg class="w-3.5 h-3.5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span>Swagger API</span>
+          </a>
+
+          <a href="/redoc" target="_blank" rel="noopener noreferrer" class="hidden md:inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-white bg-surface-850 hover:bg-surface-800 border border-surface-700/60 transition">
+            <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+            <span>ReDoc</span>
+          </a>
+
+          <button id="refresh-telemetry-btn" onclick="fetchTelemetry(true)" title="Refresh Live Telemetry" class="p-2 rounded-lg bg-surface-850 hover:bg-surface-800 text-slate-300 hover:text-white border border-surface-700/60 transition">
+            <svg id="refresh-icon" class="w-4 h-4 transition duration-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full flex-grow space-y-8">
+      
+      <!-- Live Telemetry KPI Cards -->
+      <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <!-- Card 1: Total Links -->
+        <div class="relative overflow-hidden rounded-2xl bg-surface-900/90 border border-surface-800 p-5 backdrop-blur-md">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-slate-400">Total Short Links</span>
+            <div class="w-8 h-8 rounded-lg bg-brand-500/10 text-brand-400 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-baseline space-x-2">
+            <span id="kpi-total-urls" class="text-3xl font-extrabold text-white tracking-tight">--</span>
+            <span class="text-xs text-slate-400">records</span>
+          </div>
+          <div class="mt-2 flex items-center text-xs text-slate-400">
+            <span class="text-emerald-400 font-medium">Base62</span>
+            <span class="mx-1">&bull;</span>
+            <span>Collision-safe</span>
+          </div>
+        </div>
+
+        <!-- Card 2: Active Links -->
+        <div class="relative overflow-hidden rounded-2xl bg-surface-900/90 border border-surface-800 p-5 backdrop-blur-md">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-slate-400">Active URLs</span>
+            <div class="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-baseline space-x-2">
+            <span id="kpi-active-urls" class="text-3xl font-extrabold text-white tracking-tight">--</span>
+            <span class="text-xs text-slate-400">routable</span>
+          </div>
+          <div class="mt-2 flex items-center text-xs text-slate-400">
+            <span id="kpi-active-rate" class="text-emerald-400 font-medium">--%</span>
+            <span class="mx-1">&bull;</span>
+            <span>Unexpired & enabled</span>
+          </div>
+        </div>
+
+        <!-- Card 3: Total Redirect Clicks -->
+        <div class="relative overflow-hidden rounded-2xl bg-surface-900/90 border border-surface-800 p-5 backdrop-blur-md">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-slate-400">Total Redirect Clicks</span>
+            <div class="w-8 h-8 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-baseline space-x-2">
+            <span id="kpi-total-clicks" class="text-3xl font-extrabold text-white tracking-tight">--</span>
+            <span class="text-xs text-slate-400">redirects</span>
+          </div>
+          <div class="mt-2 flex items-center text-xs text-slate-400">
+            <span class="text-cyan-400 font-medium">Sub-ms</span>
+            <span class="mx-1">&bull;</span>
+            <span>Buffered async writes</span>
+          </div>
+        </div>
+
+        <!-- Card 4: Cache Hit Ratio -->
+        <div class="relative overflow-hidden rounded-2xl bg-surface-900/90 border border-surface-800 p-5 backdrop-blur-md">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-slate-400">Cache Hit Ratio</span>
+            <div class="w-8 h-8 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+            </div>
+          </div>
+          <div class="mt-3 flex items-baseline space-x-2">
+            <span id="kpi-cache-ratio" class="text-3xl font-extrabold text-white tracking-tight">--%</span>
+            <span id="kpi-cache-backend-badge" class="text-xs px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 font-mono">L2 Cache</span>
+          </div>
+          <div class="mt-2 flex items-center text-xs text-slate-400">
+            <span>Hits: <strong id="kpi-cache-hits" class="text-slate-200">0</strong></span>
+            <span class="mx-1.5">&bull;</span>
+            <span>Misses: <strong id="kpi-cache-misses" class="text-slate-200">0</strong></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- URL Shortener Studio (Card with Tabs) -->
+      <section class="bg-surface-900/90 border border-surface-800 rounded-3xl p-6 sm:p-8 backdrop-blur-xl glow-brand">
+        <!-- Studio Tabs -->
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-surface-800 pb-5 gap-4">
+          <div>
+            <h2 class="text-xl font-bold text-white tracking-tight flex items-center space-x-2">
+              <span>Shortener Studio</span>
+              <span class="text-xs font-normal text-slate-400 px-2.5 py-1 rounded-full bg-surface-800 border border-surface-700">Production Engine</span>
+            </h2>
+            <p class="text-sm text-slate-400 mt-1">Generate lightning-fast short links with custom aliases, expirations, and QR matrixes.</p>
+          </div>
+          <div class="flex p-1 bg-surface-850 rounded-xl border border-surface-700/60 self-start sm:self-auto">
+            <button id="tab-btn-single" onclick="switchStudioTab('single')" class="px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center space-x-2 bg-brand-600 text-white shadow-md">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
+              </svg>
+              <span>Single Link</span>
+            </button>
+            <button id="tab-btn-batch" onclick="switchStudioTab('batch')" class="px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-2">
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+              </svg>
+              <span>Batch URLs</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- TAB 1: Single Link Shortener -->
+        <div id="studio-single-tab" class="mt-6">
+          <form id="single-url-form" onsubmit="handleSingleSubmit(event)" class="space-y-5">
+            <!-- Long URL Input -->
+            <div>
+              <label for="input-long-url" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                Destination URL <span class="text-rose-400">*</span>
+              </label>
+              <div class="relative rounded-xl shadow-sm">
+                <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-slate-400">
+                  <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                  </svg>
+                </div>
+                <input
+                  type="url"
+                  id="input-long-url"
+                  required
+                  placeholder="https://github.com/fastapi/fastapi/releases/tag/0.115.0"
+                  class="w-full pl-11 pr-4 py-3.5 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono transition"
+                />
+              </div>
+            </div>
+
+            <!-- Advanced Config: Custom Alias, Expiration, Max Clicks -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <!-- Custom Alias -->
+              <div>
+                <label for="input-custom-code" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Custom Alias <span class="text-slate-500 text-[10px] font-normal normal-case">(Optional, 3-16 chars)</span>
+                </label>
+                <div class="relative rounded-xl">
+                  <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-slate-500 font-mono text-xs">/</div>
+                  <input
+                    type="text"
+                    id="input-custom-code"
+                    placeholder="my-launch-link"
+                    pattern="^[a-zA-Z0-9_-]{3,16}$"
+                    title="3 to 16 alphanumeric characters, hyphens or underscores"
+                    class="w-full pl-8 pr-3 py-2.5 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono transition"
+                  />
+                </div>
+              </div>
+
+              <!-- Expiration Selector -->
+              <div>
+                <label for="input-expiration" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Link Expiration <span class="text-slate-500 text-[10px] font-normal normal-case">(TTL)</span>
+                </label>
+                <select
+                  id="input-expiration"
+                  class="w-full px-3 py-2.5 bg-surface-950 border border-surface-700 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm transition"
+                >
+                  <option value="">Never Expire</option>
+                  <option value="3600">1 Hour (3,600s)</option>
+                  <option value="86400">24 Hours (86,400s)</option>
+                  <option value="604800">7 Days (604,800s)</option>
+                  <option value="2592000">30 Days (2,592,000s)</option>
+                </select>
+              </div>
+
+              <!-- Max Clicks Cap -->
+              <div>
+                <label for="input-max-clicks" class="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-2">
+                  Click Limit <span class="text-slate-500 text-[10px] font-normal normal-case">(Auto-deactivate)</span>
+                </label>
+                <input
+                  type="number"
+                  id="input-max-clicks"
+                  min="1"
+                  max="10000000"
+                  placeholder="Unlimited"
+                  class="w-full px-3 py-2.5 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono transition"
+                />
+              </div>
+            </div>
+
+            <!-- Action Button -->
+            <div class="flex items-center justify-end pt-2">
+              <button
+                type="submit"
+                id="single-submit-btn"
+                class="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-brand-600 via-indigo-600 to-cyan-500 hover:from-brand-500 hover:to-cyan-400 text-white font-semibold text-sm tracking-wide shadow-lg shadow-brand-500/25 hover:shadow-brand-500/40 transition flex items-center justify-center space-x-2"
+              >
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>Create Short Link</span>
+              </button>
+            </div>
+          </form>
+
+          <!-- Single Creation Result Banner (Dynamically shown) -->
+          <div id="single-result-panel" class="hidden mt-6 pt-6 border-t border-surface-800">
+            <div class="rounded-2xl bg-gradient-to-r from-surface-950 to-surface-850 border border-brand-500/30 p-5 sm:p-6 glow-brand">
+              <div class="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+                <!-- Link Info -->
+                <div class="space-y-3 flex-1 min-w-0">
+                  <div class="flex items-center space-x-2">
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      Link Created Successfully
+                    </span>
+                    <span id="result-badge-code" class="font-mono text-xs text-brand-300 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/20">
+                      code
+                    </span>
+                  </div>
+
+                  <!-- Short URL & 1-Click Copy -->
+                  <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <a
+                      id="result-short-url"
+                      href="#"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-lg sm:text-xl font-bold font-mono text-cyan-400 hover:text-cyan-300 underline underline-offset-4 truncate transition"
+                    >
+                      https://...
+                    </a>
+                    <button
+                      onclick="copyResultShortUrl()"
+                      id="result-copy-btn"
+                      class="px-3.5 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center justify-center space-x-1.5 transition shadow-sm"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                      </svg>
+                      <span id="result-copy-label">Copy Link</span>
+                    </button>
+                    <a
+                      id="result-test-btn"
+                      href="#"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium flex items-center justify-center space-x-1.5 border border-surface-700 transition"
+                    >
+                      <span>Test Redirect</span>
+                      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                    </a>
+                  </div>
+
+                  <!-- Original Target Preview -->
+                  <div class="text-xs text-slate-400 truncate max-w-2xl">
+                    <span class="text-slate-500 font-medium">Target:</span>
+                    <span id="result-long-url" class="font-mono text-slate-300 ml-1">https://...</span>
+                  </div>
+
+                  <!-- Details Badges -->
+                  <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <span id="result-expires-label" class="px-2 py-0.5 rounded bg-surface-800 border border-surface-700">Expires: Never</span>
+                    <span id="result-clicks-label" class="px-2 py-0.5 rounded bg-surface-800 border border-surface-700">Limit: Unlimited</span>
+                  </div>
+                </div>
+
+                <!-- QR Matrix & Download Actions -->
+                <div class="flex flex-col sm:flex-row items-center gap-4 bg-surface-950 p-4 rounded-xl border border-surface-800 self-stretch sm:self-auto">
+                  <div id="result-qr-container" class="w-28 h-28 bg-white p-1.5 rounded-lg flex items-center justify-center shadow">
+                    <!-- Inline SVG QR inserted here -->
+                  </div>
+                  <div class="flex flex-col gap-2 w-full sm:w-auto">
+                    <a
+                      id="result-download-png"
+                      href="#"
+                      download="shortlink-qr.png"
+                      class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-medium flex items-center justify-center space-x-1.5 border border-surface-700 transition"
+                    >
+                      <svg class="w-3.5 h-3.5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      <span>Download PNG</span>
+                    </a>
+                    <a
+                      id="result-download-svg"
+                      href="#"
+                      download="shortlink-qr.svg"
+                      class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-medium flex items-center justify-center space-x-1.5 border border-surface-700 transition"
+                    >
+                      <svg class="w-3.5 h-3.5 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                      </svg>
+                      <span>Download SVG</span>
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: Batch Shortener -->
+        <div id="studio-batch-tab" class="hidden mt-6">
+          <form id="batch-url-form" onsubmit="handleBatchSubmit(event)" class="space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label for="input-batch-urls" class="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+                  Paste Multiple URLs <span class="text-slate-500 font-normal normal-case">(One per line, up to 20 links)</span>
+                </label>
+                <span id="batch-line-count" class="text-xs font-mono text-slate-400">0 / 20</span>
+              </div>
+              <textarea
+                id="input-batch-urls"
+                rows="5"
+                oninput="updateBatchCount()"
+                placeholder="https://example.com/one&#10;https://example.com/two&#10;https://example.com/three"
+                class="w-full px-4 py-3 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm font-mono transition"
+              ></textarea>
+            </div>
+            <div class="flex items-center justify-end">
+              <button
+                type="submit"
+                id="batch-submit-btn"
+                class="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-brand-600 to-cyan-500 hover:from-brand-500 hover:to-cyan-400 text-white font-semibold text-sm tracking-wide shadow-lg shadow-brand-500/25 transition flex items-center justify-center space-x-2"
+              >
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                </svg>
+                <span>Shorten Batch</span>
+              </button>
+            </div>
+          </form>
+
+          <!-- Batch Results Panel -->
+          <div id="batch-results-panel" class="hidden mt-6 pt-6 border-t border-surface-800 space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-semibold text-white flex items-center space-x-2">
+                <span>Batch Generated</span>
+                <span id="batch-result-count" class="px-2 py-0.5 rounded-full text-xs font-mono bg-brand-500/10 text-brand-300">0</span>
+              </h3>
+              <button
+                onclick="copyAllBatchLinks()"
+                class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-medium border border-surface-700 transition flex items-center space-x-1.5"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+                </svg>
+                <span id="copy-all-batch-label">Copy All Short Links</span>
+              </button>
+            </div>
+            <div id="batch-results-list" class="space-y-2 max-h-80 overflow-y-auto pr-1">
+              <!-- Injected dynamically -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Managed Links Section -->
+      <section class="bg-surface-900/90 border border-surface-800 rounded-3xl p-6 sm:p-8 backdrop-blur-xl">
+        <!-- Table Toolbar -->
+        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+          <div>
+            <div class="flex items-center space-x-3">
+              <h2 class="text-xl font-bold text-white tracking-tight">Managed Links</h2>
+              <span id="links-total-count" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-medium bg-surface-800 text-slate-300 border border-surface-700">0</span>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">Real-time status, click metrics, telemetry analysis, and lifecycle controls.</p>
+          </div>
+
+          <!-- Filters & Actions -->
+          <div class="flex flex-wrap items-center gap-3">
+            <!-- Search Input -->
+            <div class="relative flex-grow sm:flex-grow-0 sm:w-64">
+              <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400">
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <input
+                type="text"
+                id="search-input"
+                oninput="handleSearchDebounced()"
+                placeholder="Search code or URL..."
+                class="w-full pl-9 pr-3 py-2 bg-surface-950 border border-surface-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-xs font-mono transition"
+              />
+            </div>
+
+            <!-- Active Only Filter Checkbox -->
+            <label class="flex items-center space-x-2 px-3 py-2 bg-surface-950 border border-surface-700 rounded-xl text-xs text-slate-300 cursor-pointer hover:border-surface-600 transition">
+              <input
+                type="checkbox"
+                id="filter-active-only"
+                onchange="fetchLinks(0)"
+                class="rounded bg-surface-800 border-surface-700 text-brand-600 focus:ring-brand-500 h-3.5 w-3.5"
+              />
+              <span>Active Only</span>
+            </label>
+
+            <!-- Refresh Button -->
+            <button
+              onclick="fetchLinks(currentSkip)"
+              title="Refresh Links Table"
+              class="p-2 rounded-xl bg-surface-950 hover:bg-surface-800 text-slate-300 hover:text-white border border-surface-700 transition"
+            >
+              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Links Table -->
+        <div class="overflow-x-auto border border-surface-800 rounded-2xl bg-surface-950/60">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-surface-850/80 text-slate-400 border-b border-surface-800 uppercase font-semibold tracking-wider text-[11px]">
+              <tr>
+                <th scope="col" class="py-3.5 px-4">Short Code / Link</th>
+                <th scope="col" class="py-3.5 px-4">Target Destination</th>
+                <th scope="col" class="py-3.5 px-4 text-center">Status</th>
+                <th scope="col" class="py-3.5 px-4 text-center">Clicks / Limit</th>
+                <th scope="col" class="py-3.5 px-4">Created</th>
+                <th scope="col" class="py-3.5 px-4 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="links-table-body" class="divide-y divide-surface-800/80 font-mono text-slate-300">
+              <!-- Dynamically populated or skeleton loader -->
+              <tr>
+                <td colspan="6" class="py-12 text-center text-slate-500 font-sans">
+                  <div class="flex flex-col items-center justify-center space-y-3">
+                    <svg class="w-8 h-8 text-slate-600 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                    </svg>
+                    <span>Loading shortened URLs...</span>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Table Pagination Bar -->
+        <div class="mt-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+          <div id="pagination-info">
+            Showing <span id="pag-from">0</span> - <span id="pag-to">0</span> of <span id="pag-total">0</span> links
+          </div>
+          <div class="flex items-center space-x-2">
+            <button
+              id="pag-prev-btn"
+              onclick="handlePrevPage()"
+              disabled
+              class="px-3 py-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed border border-surface-700/60 transition flex items-center space-x-1"
+            >
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+              </svg>
+              <span>Previous</span>
+            </button>
+            <button
+              id="pag-next-btn"
+              onclick="handleNextPage()"
+              disabled
+              class="px-3 py-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed border border-surface-700/60 transition flex items-center space-x-1"
+            >
+              <span>Next</span>
+              <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-surface-800 bg-surface-900/60 text-xs text-slate-500 py-6">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div class="flex items-center space-x-2">
+          <span class="font-bold text-slate-300">LinkPulse Engine</span>
+          <span>&bull;</span>
+          <span>FastAPI 2.0 &bull; PostgreSQL &bull; Redis &bull; Base62 Architecture</span>
+        </div>
+        <div class="flex items-center space-x-4">
+          <a href="/health" target="_blank" class="hover:text-cyan-400 transition">/health</a>
+          <a href="/api/v1/metrics" target="_blank" class="hover:text-cyan-400 transition">/api/v1/metrics</a>
+          <a href="/docs" target="_blank" class="hover:text-cyan-400 transition">/docs</a>
+          <a href="/redoc" target="_blank" class="hover:text-cyan-400 transition">/redoc</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- 1. Rich Analytics Modal -->
+  <div id="analytics-modal" class="fixed inset-0 z-50 hidden overflow-y-auto bg-surface-950/80 backdrop-blur-md flex items-center justify-center p-4">
+    <div class="relative w-full max-w-4xl bg-surface-900 border border-surface-700 rounded-3xl p-6 sm:p-8 shadow-2xl max-h-[90vh] overflow-y-auto space-y-6">
+      <!-- Modal Header -->
+      <div class="flex items-start justify-between border-b border-surface-800 pb-4">
+        <div>
+          <div class="flex items-center space-x-3">
+            <h3 class="text-xl font-bold text-white tracking-tight flex items-center space-x-2">
+              <svg class="w-5 h-5 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+              </svg>
+              <span>Telemetry & Click Analytics</span>
+            </h3>
+            <span id="modal-analytics-code" class="px-2.5 py-0.5 rounded font-mono text-xs font-bold bg-brand-500/10 text-brand-300 border border-brand-500/20">
+              --
+            </span>
+          </div>
+          <p id="modal-analytics-long-url" class="text-xs text-slate-400 font-mono mt-1 max-w-2xl truncate">
+            https://...
+          </p>
+        </div>
+        <button onclick="closeAnalyticsModal()" class="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-surface-800 transition">
+          <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- KPI Summary Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="p-4 rounded-xl bg-surface-950 border border-surface-800">
+          <span class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Total Clicks</span>
+          <div id="modal-stat-clicks" class="text-2xl font-black text-cyan-400 mt-1">0</div>
+        </div>
+        <div class="p-4 rounded-xl bg-surface-950 border border-surface-800">
+          <span class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Unique Visitors</span>
+          <div id="modal-stat-visitors" class="text-2xl font-black text-brand-400 mt-1">0</div>
+        </div>
+        <div class="p-4 rounded-xl bg-surface-950 border border-surface-800">
+          <span class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Status</span>
+          <div id="modal-stat-status" class="text-base font-bold text-emerald-400 mt-2">Active</div>
+        </div>
+        <div class="p-4 rounded-xl bg-surface-950 border border-surface-800">
+          <span class="text-[11px] font-medium text-slate-400 uppercase tracking-wider">Last Clicked</span>
+          <div id="modal-stat-last-clicked" class="text-xs font-mono text-slate-300 mt-2 truncate">Never</div>
+        </div>
+      </div>
+
+      <!-- Clicks Timeline Visualization -->
+      <div class="p-5 rounded-2xl bg-surface-950 border border-surface-800 space-y-3">
+        <div class="flex items-center justify-between">
+          <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-1.5">
+            <svg class="w-4 h-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            <span>Clicks Over Time</span>
+          </h4>
+          <span id="modal-date-count" class="text-[11px] font-mono text-slate-400">Daily Activity</span>
+        </div>
+        <div id="modal-clicks-timeline" class="pt-2">
+          <!-- Timeline bars rendered here -->
+        </div>
+      </div>
+
+      <!-- Breakdown Grids (Devices, Browsers, OS, Referrers) -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Devices Breakdown -->
+        <div class="p-4 rounded-2xl bg-surface-950 border border-surface-800 space-y-3">
+          <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-1.5">
+            <svg class="w-4 h-4 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+            </svg>
+            <span>Device Types</span>
+          </h4>
+          <div id="modal-breakdown-devices" class="space-y-2">
+            <!-- Bars -->
+          </div>
+        </div>
+
+        <!-- Browsers Breakdown -->
+        <div class="p-4 rounded-2xl bg-surface-950 border border-surface-800 space-y-3">
+          <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-1.5">
+            <svg class="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+            </svg>
+            <span>Browsers</span>
+          </h4>
+          <div id="modal-breakdown-browsers" class="space-y-2">
+            <!-- Bars -->
+          </div>
+        </div>
+
+        <!-- Operating Systems -->
+        <div class="p-4 rounded-2xl bg-surface-950 border border-surface-800 space-y-3">
+          <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-1.5">
+            <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            <span>Operating Systems</span>
+          </h4>
+          <div id="modal-breakdown-os" class="space-y-2">
+            <!-- Bars -->
+          </div>
+        </div>
+
+        <!-- Top Referrers -->
+        <div class="p-4 rounded-2xl bg-surface-950 border border-surface-800 space-y-3">
+          <h4 class="text-xs font-semibold uppercase tracking-wider text-slate-300 flex items-center space-x-1.5">
+            <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" />
+            </svg>
+            <span>Top Referrers</span>
+          </h4>
+          <div id="modal-breakdown-referrers" class="space-y-2">
+            <!-- Bars -->
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-end pt-2">
+        <button onclick="closeAnalyticsModal()" class="px-5 py-2.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-300 text-xs font-medium border border-surface-700 transition">
+          Close Drawer
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. QR Code Dedicated Modal -->
+  <div id="qr-modal" class="fixed inset-0 z-50 hidden overflow-y-auto bg-surface-950/80 backdrop-blur-md flex items-center justify-center p-4">
+    <div class="relative w-full max-w-sm bg-surface-900 border border-surface-700 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-5 text-center">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          <span class="text-sm font-bold text-white">QR Code Matrix</span>
+          <span id="qr-modal-code" class="px-2 py-0.5 rounded font-mono text-xs bg-brand-500/10 text-brand-300 border border-brand-500/20">--</span>
+        </div>
+        <button onclick="closeQrModal()" class="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-surface-800 transition">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="flex justify-center">
+        <div id="qr-modal-img-container" class="w-48 h-48 bg-white p-3 rounded-2xl shadow-xl flex items-center justify-center">
+          <!-- Injected SVG -->
+        </div>
+      </div>
+
+      <div class="space-y-1">
+        <p class="text-xs text-slate-400">Scans resolve directly to:</p>
+        <p id="qr-modal-url" class="font-mono text-xs text-cyan-400 truncate font-semibold"></p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 pt-2">
+        <a
+          id="qr-modal-download-png"
+          href="#"
+          download="shortlink-qr.png"
+          class="px-3 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-medium flex items-center justify-center space-x-1 transition shadow"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <span>PNG Format</span>
+        </a>
+        <a
+          id="qr-modal-download-svg"
+          href="#"
+          download="shortlink-qr.svg"
+          class="px-3 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-slate-200 text-xs font-medium flex items-center justify-center space-x-1 border border-surface-700 transition"
+        >
+          <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          <span>Vector SVG</span>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="fixed bottom-5 right-5 z-50 flex flex-col space-y-2 pointer-events-none"></div>
+
+  <!-- ==================== JAVASCRIPT ==================== -->
+  <script>
+    // State management
+    let currentSkip = 0;
+    const PAGE_LIMIT = 20;
+    let searchDebounceTimer = null;
+    let lastCreatedShortUrl = '';
+    let batchCreatedUrls = [];
+
+    // Helper: Escape HTML to avoid injection
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // Helper: Toast alerts
+    function showToast(message, type = 'success') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      toast.className = `pointer-events-auto flex items-center space-x-2 px-4 py-3 rounded-xl shadow-xl text-xs font-medium border backdrop-blur-md transform transition-all duration-300 translate-y-2 opacity-0 ${
+        type === 'error'
+          ? 'bg-rose-950/90 text-rose-200 border-rose-800'
+          : type === 'info'
+          ? 'bg-sky-950/90 text-sky-200 border-sky-800'
+          : 'bg-emerald-950/90 text-emerald-200 border-emerald-800'
+      }`;
+
+      const iconSvg = type === 'error'
+        ? `<svg class="w-4 h-4 text-rose-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`
+        : `<svg class="w-4 h-4 text-emerald-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>`;
+
+      toast.innerHTML = `${iconSvg}<span>${escapeHtml(message)}</span>`;
+      container.appendChild(toast);
+
+      requestAnimationFrame(() => {
+        toast.classList.remove('translate-y-2', 'opacity-0');
+      });
+
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-2');
+        setTimeout(() => toast.remove(), 300);
+      }, 3500);
+    }
+
+    // Format ISO Dates
+    function formatDate(isoStr) {
+      if (!isoStr) return 'Never';
+      try {
+        const d = new Date(isoStr);
+        return d.toLocaleDateString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      } catch (e) {
+        return isoStr;
+      }
+    }
+
+    // Studio Tab Switching
+    function switchStudioTab(tab) {
+      const singleTab = document.getElementById('studio-single-tab');
+      const batchTab = document.getElementById('studio-batch-tab');
+      const singleBtn = document.getElementById('tab-btn-single');
+      const batchBtn = document.getElementById('tab-btn-batch');
+
+      if (tab === 'single') {
+        singleTab.classList.remove('hidden');
+        batchTab.classList.add('hidden');
+        singleBtn.className = "px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center space-x-2 bg-brand-600 text-white shadow-md";
+        batchBtn.className = "px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-2";
+      } else {
+        singleTab.classList.add('hidden');
+        batchTab.classList.remove('hidden');
+        batchBtn.className = "px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center space-x-2 bg-brand-600 text-white shadow-md";
+        singleBtn.className = "px-4 py-2 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition flex items-center space-x-2";
+      }
+    }
+
+    // Update batch counter
+    function updateBatchCount() {
+      const lines = document.getElementById('input-batch-urls').value
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.length > 0);
+      const countLabel = document.getElementById('batch-line-count');
+      countLabel.textContent = `${lines.length} / 20`;
+      if (lines.length > 20) {
+        countLabel.classList.add('text-rose-400');
+        countLabel.classList.remove('text-slate-400');
+      } else {
+        countLabel.classList.remove('text-rose-400');
+        countLabel.classList.add('text-slate-400');
+      }
+    }
+
+    // 1. Fetch Health & Live Telemetry
+    async function fetchTelemetry(isManual = false) {
+      const refreshIcon = document.getElementById('refresh-icon');
+      if (isManual) refreshIcon.classList.add('rotate-180');
+
+      try {
+        // Fetch health
+        const healthRes = await fetch('/health');
+        if (healthRes.ok) {
+          const healthData = await healthRes.json();
+          document.getElementById('health-label').textContent = 'System Online';
+          document.getElementById('health-dot').className = 'relative inline-flex rounded-full h-2 w-2 bg-emerald-500';
+          document.getElementById('health-pulse').className = 'animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75';
+          document.getElementById('cache-mode').textContent = healthData.cache_backend === 'redis' ? 'Redis L2' : 'In-Memory';
+        } else {
+          document.getElementById('health-label').textContent = 'Degraded';
+          document.getElementById('health-dot').className = 'relative inline-flex rounded-full h-2 w-2 bg-amber-500';
+          document.getElementById('health-pulse').className = 'hidden';
+        }
+
+        // Fetch metrics
+        const metricsRes = await fetch('/api/v1/metrics');
+        if (metricsRes.ok) {
+          const m = await metricsRes.json();
+          document.getElementById('kpi-total-urls').textContent = (m.total_urls || 0).toLocaleString();
+          document.getElementById('kpi-active-urls').textContent = (m.active_urls || 0).toLocaleString();
+          document.getElementById('kpi-total-clicks').textContent = (m.total_clicks || 0).toLocaleString();
+
+          const activeRate = m.total_urls > 0 ? Math.round((m.active_urls / m.total_urls) * 100) : 100;
+          document.getElementById('kpi-active-rate').textContent = `${activeRate}%`;
+
+          const ratioPercent = Math.round((m.cache_hit_ratio || 0) * 1000) / 10;
+          document.getElementById('kpi-cache-ratio').textContent = `${ratioPercent}%`;
+          document.getElementById('kpi-cache-hits').textContent = (m.cache_hits || 0).toLocaleString();
+          document.getElementById('kpi-cache-misses').textContent = (m.cache_misses || 0).toLocaleString();
+          document.getElementById('kpi-cache-backend-badge').textContent = m.cache_backend === 'redis' ? 'Redis L2' : 'In-Memory';
+        }
+        if (isManual) showToast('Live telemetry updated', 'info');
+      } catch (err) {
+        console.error('Failed to fetch telemetry:', err);
+        document.getElementById('health-label').textContent = 'Offline';
+        document.getElementById('health-dot').className = 'relative inline-flex rounded-full h-2 w-2 bg-rose-500';
+        document.getElementById('health-pulse').className = 'hidden';
+      } finally {
+        if (isManual) {
+          setTimeout(() => refreshIcon.classList.remove('rotate-180'), 500);
+        }
+      }
+    }
+
+    // 2. Fetch Links Table
+    async function fetchLinks(skip = 0) {
+      currentSkip = skip;
+      const searchVal = document.getElementById('search-input').value.trim();
+      const activeOnly = document.getElementById('filter-active-only').checked;
+
+      let url = `/api/v1/urls?skip=${skip}&limit=${PAGE_LIMIT}`;
+      if (searchVal) url += `&search=${encodeURIComponent(searchVal)}`;
+      if (activeOnly) url += `&active_only=true`;
+
+      const tbody = document.getElementById('links-table-body');
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        // Update counts
+        document.getElementById('links-total-count').textContent = data.total || 0;
+        document.getElementById('pag-total').textContent = data.total || 0;
+        document.getElementById('pag-from').textContent = data.total > 0 ? skip + 1 : 0;
+        document.getElementById('pag-to').textContent = Math.min(skip + PAGE_LIMIT, data.total || 0);
+
+        // Pagination buttons
+        document.getElementById('pag-prev-btn').disabled = (skip <= 0);
+        document.getElementById('pag-next-btn').disabled = (skip + PAGE_LIMIT >= data.total);
+
+        if (!data.items || data.items.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="6" class="py-12 text-center text-slate-500 font-sans">
+                <div class="flex flex-col items-center justify-center space-y-2">
+                  <svg class="w-8 h-8 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                  <p class="text-sm text-slate-400">No shortened URLs found matching criteria.</p>
+                </div>
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        // Render rows
+        tbody.innerHTML = data.items.map(item => {
+          // Status calculation
+          const isExpired = item.expires_at && new Date(item.expires_at) < new Date();
+          const isCapReached = item.max_clicks !== null && item.max_clicks !== undefined && item.click_count >= item.max_clicks;
+
+          let statusBadge = '';
+          if (!item.is_active) {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">Disabled</span>`;
+          } else if (isExpired) {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/30">Expired</span>`;
+          } else if (isCapReached) {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">Cap Reached</span>`;
+          } else {
+            statusBadge = `<span class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">Active</span>`;
+          }
+
+          // Clicks progress
+          let clicksDisplay = `<div class="font-bold text-slate-200">${item.click_count.toLocaleString()}</div>`;
+          if (item.max_clicks) {
+            const pct = Math.min(100, Math.round((item.click_count / item.max_clicks) * 100));
+            clicksDisplay = `
+              <div class="flex flex-col items-center">
+                <span class="font-bold text-slate-200">${item.click_count} <span class="text-slate-500 text-[10px]">/ ${item.max_clicks}</span></span>
+                <div class="w-16 bg-surface-800 rounded-full h-1 mt-1 overflow-hidden">
+                  <div class="bg-cyan-400 h-1 rounded-full" style="width: ${pct}%"></div>
+                </div>
+              </div>
+            `;
+          }
+
+          return `
+            <tr class="hover:bg-surface-850/40 transition">
+              <!-- Short Code -->
+              <td class="py-3 px-4">
+                <div class="flex items-center space-x-2">
+                  <span class="px-2 py-0.5 rounded font-mono font-bold text-xs bg-brand-500/10 text-brand-300 border border-brand-500/20">${escapeHtml(item.short_code)}</span>
+                  <a href="${escapeHtml(item.short_url)}" target="_blank" class="text-slate-400 hover:text-cyan-400 transition" title="Open short link">
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                  </a>
+                  <button onclick="copyToClipboard('${escapeHtml(item.short_url)}', 'Link copied')" class="text-slate-500 hover:text-slate-200 transition" title="Copy URL">
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2" />
+                    </svg>
+                  </button>
+                </div>
+              </td>
+
+              <!-- Target URL -->
+              <td class="py-3 px-4 max-w-xs font-sans">
+                <a href="${escapeHtml(item.long_url)}" target="_blank" class="text-slate-300 hover:text-white truncate block text-xs" title="${escapeHtml(item.long_url)}">
+                  ${escapeHtml(item.long_url)}
+                </a>
+              </td>
+
+              <!-- Status -->
+              <td class="py-3 px-4 text-center">
+                ${statusBadge}
+              </td>
+
+              <!-- Clicks -->
+              <td class="py-3 px-4 text-center">
+                ${clicksDisplay}
+              </td>
+
+              <!-- Created -->
+              <td class="py-3 px-4 text-slate-400 text-[11px] font-sans">
+                ${formatDate(item.created_at)}
+              </td>
+
+              <!-- Actions -->
+              <td class="py-3 px-4 text-right">
+                <div class="flex items-center justify-end space-x-1 font-sans">
+                  <!-- Analytics -->
+                  <button
+                    onclick="openAnalyticsModal('${escapeHtml(item.short_code)}')"
+                    class="p-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 text-cyan-400 hover:text-cyan-300 border border-surface-700/60 transition"
+                    title="View Analytics"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                  </button>
+
+                  <!-- QR Code -->
+                  <button
+                    onclick="openQrModal('${escapeHtml(item.short_code)}', '${escapeHtml(item.short_url)}')"
+                    class="p-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 text-brand-400 hover:text-brand-300 border border-surface-700/60 transition"
+                    title="View QR Code"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                    </svg>
+                  </button>
+
+                  <!-- Toggle Active/Pause -->
+                  <button
+                    onclick="toggleLinkActive('${escapeHtml(item.short_code)}', ${!item.is_active})"
+                    class="p-1.5 rounded-lg bg-surface-850 hover:bg-surface-800 ${item.is_active ? 'text-amber-400 hover:text-amber-300' : 'text-emerald-400 hover:text-emerald-300'} border border-surface-700/60 transition"
+                    title="${item.is_active ? 'Pause / Deactivate' : 'Activate'}"
+                  >
+                    ${item.is_active
+                      ? `<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`
+                      : `<svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>`
+                    }
+                  </button>
+
+                  <!-- Delete -->
+                  <button
+                    onclick="deleteLink('${escapeHtml(item.short_code)}')"
+                    class="p-1.5 rounded-lg bg-surface-850 hover:bg-rose-950/40 text-rose-400 hover:text-rose-300 border border-surface-700/60 transition"
+                    title="Delete Link"
+                  >
+                    <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+      } catch (err) {
+        console.error('Failed to fetch links:', err);
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="6" class="py-8 text-center text-rose-400 font-sans">
+              Failed to load links from API server.
+            </td>
+          </tr>
+        `;
+      }
+    }
+
+    function handlePrevPage() {
+      if (currentSkip >= PAGE_LIMIT) {
+        fetchLinks(currentSkip - PAGE_LIMIT);
+      }
+    }
+
+    function handleNextPage() {
+      fetchLinks(currentSkip + PAGE_LIMIT);
+    }
+
+    function handleSearchDebounced() {
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = setTimeout(() => {
+        fetchLinks(0);
+      }, 300);
+    }
+
+    // 3. Single URL Form Submit
+    async function handleSingleSubmit(e) {
+      e.preventDefault();
+      const longUrl = document.getElementById('input-long-url').value.trim();
+      const customCode = document.getElementById('input-custom-code').value.trim();
+      const expirationVal = document.getElementById('input-expiration').value;
+      const maxClicksVal = document.getElementById('input-max-clicks').value;
+      const submitBtn = document.getElementById('single-submit-btn');
+
+      if (!longUrl) return;
+
+      const payload = { long_url: longUrl };
+      if (customCode) payload.custom_code = customCode;
+      if (expirationVal) payload.expires_in_seconds = parseInt(expirationVal, 10);
+      if (maxClicksVal) payload.max_clicks = parseInt(maxClicksVal, 10);
+
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = `
+        <svg class="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <span>Creating...</span>
+      `;
+
+      try {
+        const res = await fetch('/api/v1/urls', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || 'Failed to create short link');
+        }
+
+        showToast(`Short link created: ${data.short_code}`, 'success');
+
+        // Render result panel
+        lastCreatedShortUrl = data.short_url;
+        document.getElementById('result-badge-code').textContent = data.short_code;
+        document.getElementById('result-short-url').textContent = data.short_url;
+        document.getElementById('result-short-url').href = data.short_url;
+        document.getElementById('result-test-btn').href = data.short_url;
+        document.getElementById('result-long-url').textContent = data.long_url;
+
+        document.getElementById('result-expires-label').textContent = data.expires_at ? `Expires: ${formatDate(data.expires_at)}` : 'Expires: Never';
+        document.getElementById('result-clicks-label').textContent = data.max_clicks ? `Max Clicks: ${data.max_clicks}` : 'Max Clicks: Unlimited';
+
+        // Load QR inline SVG
+        const qrContainer = document.getElementById('result-qr-container');
+        qrContainer.innerHTML = `<img src="/api/v1/urls/${encodeURIComponent(data.short_code)}/qr?format=svg" class="w-full h-full object-contain" alt="QR Code" />`;
+
+        // Configure download buttons
+        document.getElementById('result-download-png').href = `/api/v1/urls/${encodeURIComponent(data.short_code)}/qr?format=png`;
+        document.getElementById('result-download-svg').href = `/api/v1/urls/${encodeURIComponent(data.short_code)}/qr?format=svg`;
+
+        document.getElementById('single-result-panel').classList.remove('hidden');
+
+        // Refresh telemetry and table
+        fetchTelemetry();
+        fetchLinks(0);
+      } catch (err) {
+        showToast(err.message || 'Error creating link', 'error');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4" />
+          </svg>
+          <span>Create Short Link</span>
+        `;
+      }
+    }
+
+    // Copy single short URL
+    function copyResultShortUrl() {
+      if (!lastCreatedShortUrl) return;
+      copyToClipboard(lastCreatedShortUrl, 'Short link copied to clipboard!');
+      const label = document.getElementById('result-copy-label');
+      label.textContent = 'Copied!';
+      setTimeout(() => label.textContent = 'Copy Link', 2000);
+    }
+
+    // 4. Batch URL Form Submit
+    async function handleBatchSubmit(e) {
+      e.preventDefault();
+      const raw = document.getElementById('input-batch-urls').value;
+      const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+
+      if (lines.length === 0) {
+        showToast('Please enter at least one URL.', 'error');
+        return;
+      }
+      if (lines.length > 20) {
+        showToast('Maximum 20 URLs allowed per batch.', 'error');
+        return;
+      }
+
+      const submitBtn = document.getElementById('batch-submit-btn');
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = `
+        <svg class="w-4 h-4 animate-spin mr-2" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+        </svg>
+        <span>Processing Batch...</span>
+      `;
+
+      try {
+        const payload = {
+          urls: lines.map(url => ({ long_url: url }))
+        };
+
+        const res = await fetch('/api/v1/urls/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || 'Batch processing failed');
+        }
+
+        batchCreatedUrls = data.items || [];
+        showToast(`Successfully processed ${batchCreatedUrls.length} URLs!`, 'success');
+
+        // Render batch results
+        document.getElementById('batch-result-count').textContent = `${batchCreatedUrls.length} links`;
+        const listContainer = document.getElementById('batch-results-list');
+        listContainer.innerHTML = batchCreatedUrls.map(item => `
+          <div class="flex items-center justify-between p-3 rounded-xl bg-surface-950 border border-surface-800 text-xs">
+            <div class="space-y-0.5 truncate mr-3">
+              <a href="${escapeHtml(item.short_url)}" target="_blank" class="font-mono font-bold text-cyan-400 hover:text-cyan-300">
+                ${escapeHtml(item.short_url)}
+              </a>
+              <div class="text-[11px] text-slate-400 truncate max-w-md">${escapeHtml(item.long_url)}</div>
+            </div>
+            <div class="flex items-center space-x-1.5 flex-shrink-0">
+              <button
+                onclick="copyToClipboard('${escapeHtml(item.short_url)}', 'Link copied')"
+                class="px-2.5 py-1 rounded-lg bg-surface-850 hover:bg-surface-800 text-slate-300 text-xs border border-surface-700/60 transition"
+              >
+                Copy
+              </button>
+              <button
+                onclick="openQrModal('${escapeHtml(item.short_code)}', '${escapeHtml(item.short_url)}')"
+                class="p-1 rounded-lg bg-surface-850 hover:bg-surface-800 text-brand-400 border border-surface-700/60 transition"
+                title="QR Code"
+              >
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        `).join('');
+
+        document.getElementById('batch-results-panel').classList.remove('hidden');
+
+        fetchTelemetry();
+        fetchLinks(0);
+      } catch (err) {
+        showToast(err.message || 'Batch creation failed', 'error');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = `
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+          </svg>
+          <span>Shorten Batch</span>
+        `;
+      }
+    }
+
+    function copyAllBatchLinks() {
+      if (!batchCreatedUrls || batchCreatedUrls.length === 0) return;
+      const text = batchCreatedUrls.map(u => u.short_url).join('\n');
+      copyToClipboard(text, 'All batch links copied to clipboard!');
+      const label = document.getElementById('copy-all-batch-label');
+      label.textContent = 'Copied All!';
+      setTimeout(() => label.textContent = 'Copy All Short Links', 2000);
+    }
+
+    // 5. Toggle Link Active State
+    async function toggleLinkActive(shortCode, newActive) {
+      try {
+        const res = await fetch(`/api/v1/urls/${encodeURIComponent(shortCode)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_active: newActive })
+        });
+        if (!res.ok) throw new Error('Failed to update status');
+        showToast(`Link '${shortCode}' ${newActive ? 'activated' : 'paused'}`, 'info');
+        fetchLinks(currentSkip);
+        fetchTelemetry();
+      } catch (err) {
+        showToast(err.message || 'Error updating status', 'error');
+      }
+    }
+
+    // 6. Delete Link
+    async function deleteLink(shortCode) {
+      if (!confirm(`Are you sure you want to permanently delete short link '${shortCode}'? This will also remove its telemetry history.`)) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/v1/urls/${encodeURIComponent(shortCode)}`, {
+          method: 'DELETE'
+        });
+        if (!res.ok && res.status !== 204) throw new Error('Failed to delete URL');
+        showToast(`Short link '${shortCode}' deleted`, 'info');
+        fetchLinks(currentSkip);
+        fetchTelemetry();
+      } catch (err) {
+        showToast(err.message || 'Error deleting link', 'error');
+      }
+    }
+
+    // 7. Rich Analytics Modal
+    async function openAnalyticsModal(shortCode) {
+      const modal = document.getElementById('analytics-modal');
+      modal.classList.remove('hidden');
+
+      // Clear placeholders
+      document.getElementById('modal-analytics-code').textContent = shortCode;
+      document.getElementById('modal-analytics-long-url').textContent = 'Loading telemetry...';
+      document.getElementById('modal-stat-clicks').textContent = '...';
+      document.getElementById('modal-stat-visitors').textContent = '...';
+      document.getElementById('modal-stat-status').textContent = '...';
+      document.getElementById('modal-stat-last-clicked').textContent = '...';
+      document.getElementById('modal-clicks-timeline').innerHTML = '<div class="text-xs text-slate-500">Loading timeline...</div>';
+      document.getElementById('modal-breakdown-devices').innerHTML = '';
+      document.getElementById('modal-breakdown-browsers').innerHTML = '';
+      document.getElementById('modal-breakdown-os').innerHTML = '';
+      document.getElementById('modal-breakdown-referrers').innerHTML = '';
+
+      try {
+        const res = await fetch(`/api/v1/urls/${encodeURIComponent(shortCode)}/stats`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        document.getElementById('modal-analytics-long-url').textContent = data.long_url;
+        document.getElementById('modal-stat-clicks').textContent = (data.click_count || 0).toLocaleString();
+        document.getElementById('modal-stat-visitors').textContent = (data.unique_visitors || 0).toLocaleString();
+
+        let statusText = 'Active';
+        let statusClass = 'text-emerald-400';
+        if (!data.is_active) {
+          statusText = 'Disabled';
+          statusClass = 'text-slate-400';
+        } else if (data.is_expired) {
+          statusText = 'Expired';
+          statusClass = 'text-rose-400';
+        } else if (data.max_clicks && data.click_count >= data.max_clicks) {
+          statusText = 'Cap Reached';
+          statusClass = 'text-amber-400';
+        }
+        const statusEl = document.getElementById('modal-stat-status');
+        statusEl.textContent = statusText;
+        statusEl.className = `text-base font-bold ${statusClass} mt-2`;
+
+        document.getElementById('modal-stat-last-clicked').textContent = formatDate(data.last_clicked_at);
+
+        // Timeline visualization
+        renderTimeline(data.clicks_by_date || {});
+
+        // Breakdowns
+        renderBreakdown('modal-breakdown-devices', data.device_breakdown || {}, data.click_count, 'cyan');
+        renderBreakdown('modal-breakdown-browsers', data.browser_breakdown || {}, data.click_count, 'purple');
+        renderBreakdown('modal-breakdown-os', data.os_breakdown || {}, data.click_count, 'emerald');
+        renderBreakdown('modal-breakdown-referrers', data.top_referrers || {}, data.click_count, 'amber');
+      } catch (err) {
+        showToast('Failed to load telemetry stats', 'error');
+        document.getElementById('modal-analytics-long-url').textContent = 'Unable to fetch telemetry data.';
+      }
+    }
+
+    function closeAnalyticsModal() {
+      document.getElementById('analytics-modal').classList.add('hidden');
+    }
+
+    function renderTimeline(clicksByDate) {
+      const container = document.getElementById('modal-clicks-timeline');
+      const dates = Object.keys(clicksByDate).sort();
+
+      if (dates.length === 0) {
+        container.innerHTML = `<div class="text-xs text-slate-500 py-4 text-center">No recorded click events yet. Click the short link to see telemetry.</div>`;
+        return;
+      }
+
+      const maxVal = Math.max(...dates.map(d => clicksByDate[d]), 1);
+
+      container.innerHTML = `
+        <div class="flex items-end space-x-3 h-28 pt-4 overflow-x-auto pb-1">
+          ${dates.map(d => {
+            const count = clicksByDate[d];
+            const heightPct = Math.max(12, Math.round((count / maxVal) * 100));
+            return `
+              <div class="flex flex-col items-center flex-1 min-w-[50px] group">
+                <span class="text-[10px] font-mono text-cyan-400 font-bold mb-1 opacity-80 group-hover:opacity-100">${count}</span>
+                <div class="w-full bg-surface-850 rounded-t-md h-20 flex items-end">
+                  <div class="w-full bg-gradient-to-t from-brand-600 to-cyan-400 rounded-t-md group-hover:brightness-125 transition-all" style="height: ${heightPct}%"></div>
+                </div>
+                <span class="text-[9px] font-mono text-slate-400 mt-1 truncate w-full text-center">${d.slice(5)}</span>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      `;
+    }
+
+    function renderBreakdown(elementId, dataMap, totalClicks, color) {
+      const container = document.getElementById(elementId);
+      const keys = Object.keys(dataMap);
+
+      if (keys.length === 0) {
+        container.innerHTML = `<div class="text-[11px] text-slate-500 py-1">No data recorded</div>`;
+        return;
+      }
+
+      const total = totalClicks > 0 ? totalClicks : keys.reduce((acc, k) => acc + dataMap[k], 0);
+
+      const colorClasses = {
+        cyan: 'bg-cyan-400',
+        purple: 'bg-purple-400',
+        emerald: 'bg-emerald-400',
+        amber: 'bg-amber-400',
+      };
+      const barColor = colorClasses[color] || 'bg-brand-500';
+
+      container.innerHTML = keys
+        .sort((a, b) => dataMap[b] - dataMap[a])
+        .map(key => {
+          const count = dataMap[key];
+          const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+          return `
+            <div class="space-y-1">
+              <div class="flex items-center justify-between text-xs">
+                <span class="text-slate-300 font-medium">${escapeHtml(key)}</span>
+                <span class="font-mono text-slate-400 text-[11px]">${count} <span class="text-slate-500">(${pct}%)</span></span>
+              </div>
+              <div class="w-full bg-surface-850 rounded-full h-1.5 overflow-hidden">
+                <div class="${barColor} h-1.5 rounded-full" style="width: ${pct}%"></div>
+              </div>
+            </div>
+          `;
+        }).join('');
+    }
+
+    // 8. Dedicated QR Modal
+    function openQrModal(shortCode, shortUrl) {
+      const modal = document.getElementById('qr-modal');
+      modal.classList.remove('hidden');
+
+      document.getElementById('qr-modal-code').textContent = shortCode;
+      document.getElementById('qr-modal-url').textContent = shortUrl;
+
+      const container = document.getElementById('qr-modal-img-container');
+      container.innerHTML = `<img src="/api/v1/urls/${encodeURIComponent(shortCode)}/qr?format=svg" class="w-full h-full object-contain" alt="QR Code" />`;
+
+      document.getElementById('qr-modal-download-png').href = `/api/v1/urls/${encodeURIComponent(shortCode)}/qr?format=png`;
+      document.getElementById('qr-modal-download-svg').href = `/api/v1/urls/${encodeURIComponent(shortCode)}/qr?format=svg`;
+    }
+
+    function closeQrModal() {
+      document.getElementById('qr-modal').classList.add('hidden');
+    }
+
+    // Universal Clipboard Copy
+    async function copyToClipboard(text, successMsg = 'Copied!') {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textArea = document.createElement('textarea');
+          textArea.value = text;
+          textArea.style.position = 'fixed';
+          textArea.style.left = '-999999px';
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+          document.execCommand('copy');
+          textArea.remove();
+        }
+        showToast(successMsg, 'success');
+      } catch (err) {
+        showToast('Could not copy to clipboard', 'error');
+      }
+    }
+
+    // Close modals on Escape key or backdrop click
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        closeAnalyticsModal();
+        closeQrModal();
+      }
+    });
+
+    document.getElementById('analytics-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'analytics-modal') closeAnalyticsModal();
+    });
+
+    document.getElementById('qr-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'qr-modal') closeQrModal();
+    });
+
+    // Initial Load & Auto-Telemetry Poll
+    document.addEventListener('DOMContentLoaded', () => {
+      fetchTelemetry();
+      fetchLinks(0);
+      // Auto-poll telemetry every 15 seconds
+      setInterval(() => fetchTelemetry(false), 15000);
+    });
+  </script>
+</body>
+</html>
